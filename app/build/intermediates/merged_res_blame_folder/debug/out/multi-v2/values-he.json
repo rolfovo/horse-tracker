@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "cz.example.horsetracker.app-mergeDebugResources-57:/values-he/values-he.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\rolfkarlsson\\.gradle\\caches\\9.0-milestone-1\\transforms\\c4e293aa75b6b34698fdc7c5fbccc76b\\transformed\\android-sdk-10.0.2\\res\\values-he\\values-he.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8",
+                        "startColumns": "4,4,4,4,4,4,4",
+                        "startOffsets": "55,179,270,388,493,647,763",
+                        "endColumns": "123,90,117,104,153,115,138",
+                        "endOffsets": "174,265,383,488,642,758,897"
+                    }
+                }
+            ]
+        }
+    ]
+}
