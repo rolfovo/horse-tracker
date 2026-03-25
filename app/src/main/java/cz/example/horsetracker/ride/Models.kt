@@ -69,7 +69,8 @@ data class AppState(
     val horseStats: Map<String, RideStats> = emptyMap(),
     val rides: List<RideSummary> = emptyList(),
     val points: List<TrackPoint> = emptyList(),
-    val waypoints: List<Waypoint> = emptyList(),
+    val rideWaypoints: List<Waypoint> = emptyList(),
+    val routeWaypoints: List<Waypoint> = emptyList(),
     val routeToFollow: List<Pair<Double, Double>> = emptyList(),
     val lastSpeedMps: Double = 0.0,
     val lastAccuracyM: Double = 0.0,
@@ -78,5 +79,10 @@ data class AppState(
     val currentDurationMs: Long = 0L,
     val currentAvgSpeedMps: Double = 0.0,
     val offRouteMeters: Double = 0.0,
+    val offRouteWarnThresholdM: Double = 30.0,
+    val backOnRouteThresholdM: Double = 5.0,
     val mapState: MapState = MapState(),
-)
+) {
+    val waypoints: List<Waypoint>
+        get() = routeWaypoints + rideWaypoints
+}

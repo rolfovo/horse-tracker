@@ -1,7 +1,9 @@
 package cz.example.horsetracker.ride
 
 import android.content.Context
+import android.net.Uri
 import cz.example.horsetracker.geo.Geo
+import cz.example.horsetracker.map.OfflineTilePrefetcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +21,7 @@ import java.util.Locale
 object RideRepository {
     private val _state = MutableStateFlow(AppState())
     val state = _state.asStateFlow()
+    private var appContext: Context? = null
 
     sealed interface UiEvent {
         data class Message(val text: String) : UiEvent
@@ -31,17 +34,21 @@ object RideRepository {
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun init(context: Context) {
+        appContext = context.applicationContext
         ioScope.launch {
             val horses = HorseStorage.listHorses(context)
             val selected = SelectionStorage.getSelectedHorseId(context)
             val stats = computeStats(context, horses)
             val rides = listRidesInternal(context, selected)
+            val (warnM, backM) = FollowSettingsStorage.load(context)
             _state.value =
                 _state.value.copy(
                     horses = horses,
                     selectedHorseId = selected,
                     horseStats = stats,
                     rides = rides,
+                    offRouteWarnThresholdM = warnM,
+                    backOnRouteThresholdM = backM,
                 )
         }
     }
@@ -107,12 +114,40 @@ object RideRepository {
     }
 
     fun setFollowing(isFollowing: Boolean) {
-        _state.value = _state.value.copy(isFollowing = isFollowing)
+        val prev = _state.value
+        _state.value =
+            prev.copy(
+                isFollowing = isFollowing,
+                offRouteMeters = if (isFollowing) prev.offRouteMeters else 0.0,
+                mapState =
+                    if (isFollowing) {
+                        prev.mapState
+                    } else {
+                        prev.mapState.copy(snapLat = null, snapLon = null)
+                    },
+            )
     }
 
     fun toggleAutoCenter() {
         val prev = _state.value
         _state.value = prev.copy(isAutoCenter = !prev.isAutoCenter)
+    }
+
+    fun updateOffRouteWarnThreshold(deltaM: Double) {
+        val prev = _state.value
+        val next = (prev.offRouteWarnThresholdM + deltaM).coerceIn(10.0, 200.0)
+        // vždy držíme back-on-route menší než warn threshold
+        val back = prev.backOnRouteThresholdM.coerceAtMost(next - 1.0).coerceAtLeast(1.0)
+        _state.value = prev.copy(offRouteWarnThresholdM = next, backOnRouteThresholdM = back)
+        appContext?.let { FollowSettingsStorage.save(it, next, back) }
+    }
+
+    fun updateBackOnRouteThreshold(deltaM: Double) {
+        val prev = _state.value
+        val maxBack = (prev.offRouteWarnThresholdM - 1.0).coerceAtLeast(1.0)
+        val next = (prev.backOnRouteThresholdM + deltaM).coerceIn(1.0, maxBack)
+        _state.value = prev.copy(backOnRouteThresholdM = next)
+        appContext?.let { FollowSettingsStorage.save(it, prev.offRouteWarnThresholdM, next) }
     }
 
     fun onLocation(point: TrackPoint) {
@@ -170,10 +205,11 @@ object RideRepository {
 
     fun addWaypoint(waypoint: Waypoint) {
         val prev = _state.value
-        val newWaypoints = prev.waypoints + waypoint
+        val newWaypoints = prev.rideWaypoints + waypoint
+        val next = prev.copy(rideWaypoints = newWaypoints)
         _state.value = prev.copy(
-            waypoints = newWaypoints,
-            mapState = prev.mapState.copy(waypoints = newWaypoints),
+            rideWaypoints = newWaypoints,
+            mapState = prev.mapState.copy(waypoints = next.waypoints),
         )
     }
 
@@ -207,19 +243,51 @@ object RideRepository {
 
     fun resetRide() {
         val prev = _state.value
-        _state.value = prev.copy(
-            isRecording = false,
-            points = emptyList(),
-            waypoints = emptyList(),
-            lastSpeedMps = 0.0,
-            lastAccuracyM = 0.0,
-            lastHeadingDeg = null,
-            currentDistanceM = 0.0,
-            currentDurationMs = 0L,
-            currentAvgSpeedMps = 0.0,
-            offRouteMeters = 0.0,
-            mapState = MapState(followRoute = effectiveFollowRoute(prev), snapLat = null, snapLon = null),
-        )
+        val next =
+            prev.copy(
+                isRecording = false,
+                points = emptyList(),
+                rideWaypoints = emptyList(),
+                lastSpeedMps = 0.0,
+                lastAccuracyM = 0.0,
+                lastHeadingDeg = null,
+                currentDistanceM = 0.0,
+                currentDurationMs = 0L,
+                currentAvgSpeedMps = 0.0,
+                offRouteMeters = 0.0,
+                mapState =
+                    prev.mapState.copy(
+                        userHeadingDeg = null,
+                        snapLat = null,
+                        snapLon = null,
+                        segments = emptyList(),
+                    ),
+            )
+        _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
+    }
+
+    fun prepareForNewActiveRide() {
+        val prev = _state.value
+        val next =
+            prev.copy(
+                points = emptyList(),
+                rideWaypoints = emptyList(),
+                lastSpeedMps = 0.0,
+                lastAccuracyM = 0.0,
+                lastHeadingDeg = null,
+                currentDistanceM = 0.0,
+                currentDurationMs = 0L,
+                currentAvgSpeedMps = 0.0,
+                offRouteMeters = 0.0,
+                mapState =
+                    prev.mapState.copy(
+                        userHeadingDeg = null,
+                        snapLat = null,
+                        snapLon = null,
+                        segments = emptyList(),
+                    ),
+            )
+        _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
     }
 
     fun saveCurrentRide(context: Context) {
@@ -228,26 +296,55 @@ object RideRepository {
         if (current.points.isEmpty()) return
 
         ioScope.launch {
+            saveRideSnapshot(context, current, horseId)
+        }
+    }
+
+    fun saveCurrentRideForHorseName(context: Context, horseName: String) {
+        val trimmed = horseName.trim()
+        if (trimmed.isEmpty()) {
+            _events.tryEmit(UiEvent.Message("Zadej jméno koně."))
+            return
+        }
+        val current = _state.value
+        if (current.points.isEmpty()) {
+            _events.tryEmit(UiEvent.Message("Není co ukládat, trasa je prázdná."))
+            return
+        }
+
+        ioScope.launch {
             try {
-                val ridesDir = File(context.filesDir, "rides").apply { mkdirs() }
-                val ts = System.currentTimeMillis()
-                val horseName = current.horses.firstOrNull { it.id == horseId }?.name ?: "UnknownHorse"
-                val baseName = buildRideBaseName(current.points, horseName, ts)
-                val uniqueBase = ensureUniqueBaseName(ridesDir, baseName, ts)
-                val gpxName = "$uniqueBase.gpx"
-                val metaName = "$uniqueBase.meta.json"
-
-                val gpxFile = File(ridesDir, gpxName)
-                GpxStorage.writeGpx(gpxFile, current.points, current.waypoints)
-
-                val meta = buildRideMeta(horseId, gpxName, metaName, current.points)
-                RideMetaStorage.writeMeta(context, meta, metaName)
-                refreshStats(context)
-                refreshRides(context)
-
-                _events.tryEmit(UiEvent.RideSaved(gpxFile.absolutePath))
+                val horse = HorseStorage.addHorse(context, trimmed)
+                SelectionStorage.setSelectedHorseId(context, horse.id)
+                val horses = HorseStorage.listHorses(context)
+                _state.value = _state.value.copy(horses = horses, selectedHorseId = horse.id)
+                saveRideSnapshot(context, current, horse.id)
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Uložení selhalo: ${t.message ?: t::class.java.simpleName}"))
+            }
+        }
+    }
+
+    fun prefetchOfflineAroundCurrent(context: Context, radiusKm: Double = 4.0) {
+        val snapshot = _state.value
+        val lat = snapshot.mapState.userLat
+        val lon = snapshot.mapState.userLon
+        if (lat == null || lon == null) {
+            _events.tryEmit(UiEvent.Message("Nejdřív je potřeba mít aktuální GPS pozici."))
+            return
+        }
+
+        ioScope.launch {
+            try {
+                _events.tryEmit(UiEvent.Message("Stahuju offline mapu okolí (${radiusKm.toInt()} km)..."))
+                val result = OfflineTilePrefetcher.prefetchAround(context, lat, lon, radiusKm = radiusKm)
+                _events.tryEmit(
+                    UiEvent.Message(
+                        "Offline mapy hotovo: staženo ${result.downloaded}, v cache ${result.skipped}, chyby ${result.failed}.",
+                    ),
+                )
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Offline stahování selhalo: ${t.message ?: t::class.java.simpleName}"))
             }
         }
     }
@@ -280,17 +377,41 @@ object RideRepository {
             if (!gpxFile.exists()) return@launch
 
             val ride = GpxStorage.readGpx(gpxFile)
-            setRouteToFollow(ride.points.map { it.lat to it.lon })
             val prev = _state.value
-            _state.value = prev.copy(
-                isAutoCenter = false,
-                waypoints = ride.waypoints,
-                mapState = prev.mapState.copy(waypoints = ride.waypoints),
-            )
+            val next =
+                prev.copy(
+                    isAutoCenter = false,
+                    points = emptyList(),
+                    rideWaypoints = emptyList(),
+                    routeWaypoints = ride.waypoints,
+                    routeToFollow = ride.points.map { it.lat to it.lon },
+                    lastSpeedMps = 0.0,
+                    lastAccuracyM = 0.0,
+                    lastHeadingDeg = null,
+                    currentDistanceM = 0.0,
+                    currentDurationMs = 0L,
+                    currentAvgSpeedMps = 0.0,
+                    offRouteMeters = 0.0,
+                    mapState =
+                        prev.mapState.copy(
+                            userHeadingDeg = null,
+                            snapLat = null,
+                            snapLon = null,
+                            segments = emptyList(),
+                        ),
+                )
+            _state.value =
+                next.copy(
+                    mapState =
+                        next.mapState.copy(
+                            waypoints = next.waypoints,
+                            followRoute = effectiveFollowRoute(next),
+                        ),
+                )
         }
     }
 
-    fun deleteRide(context: Context, metaFileName: String) {
+    fun deleteRide(context: Context, metaFileName: String, horseIdFilter: String? = _state.value.selectedHorseId) {
         ioScope.launch {
             try {
                 val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName } ?: return@launch
@@ -298,10 +419,76 @@ object RideRepository {
                 File(ridesDir, meta.gpxFileName).delete()
                 File(ridesDir, meta.metaFileName).delete()
                 refreshStats(context)
-                refreshRides(context)
+                refreshRides(context, horseIdFilter)
                 _events.tryEmit(UiEvent.Message("Jízda smazána."))
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Mazání selhalo: ${t.message ?: t::class.java.simpleName}"))
+            }
+        }
+    }
+
+    fun exportRideToUri(context: Context, metaFileName: String, destinationUri: Uri) {
+        ioScope.launch {
+            try {
+                val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName }
+                if (meta == null) {
+                    _events.tryEmit(UiEvent.Message("Export selhal: jízda nebyla nalezena."))
+                    return@launch
+                }
+
+                val sourceFile = File(File(context.filesDir, "rides"), meta.gpxFileName)
+                if (!sourceFile.exists()) {
+                    _events.tryEmit(UiEvent.Message("Export selhal: GPX soubor neexistuje."))
+                    return@launch
+                }
+
+                val output =
+                    context.contentResolver.openOutputStream(destinationUri)
+                        ?: run {
+                            _events.tryEmit(UiEvent.Message("Export selhal: nelze otevřít cílový soubor."))
+                            return@launch
+                        }
+
+                sourceFile.inputStream().use { input ->
+                    output.use { out -> input.copyTo(out) }
+                }
+
+                _events.tryEmit(UiEvent.Message("Export hotov: ${meta.gpxFileName}"))
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Export selhal: ${t.message ?: t::class.java.simpleName}"))
+            }
+        }
+    }
+
+    fun exportBackupToUri(context: Context, destinationUri: Uri) {
+        if (_state.value.isRecording || _state.value.isFollowing) {
+            _events.tryEmit(UiEvent.Message("Backup nelze exportovat během aktivního záznamu nebo follow režimu."))
+            return
+        }
+
+        ioScope.launch {
+            try {
+                AppBackupStorage.export(context, destinationUri)
+                _events.tryEmit(UiEvent.Message("Backup hotov."))
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Export backupu selhal: ${t.message ?: t::class.java.simpleName}"))
+            }
+        }
+    }
+
+    fun importBackupFromUri(context: Context, sourceUri: Uri) {
+        if (_state.value.isRecording || _state.value.isFollowing) {
+            _events.tryEmit(UiEvent.Message("Backup nelze importovat během aktivního záznamu nebo follow režimu."))
+            return
+        }
+
+        ioScope.launch {
+            try {
+                AppBackupStorage.import(context, sourceUri)
+                reloadFromStorage(context, AppState())
+                _events.tryEmit(UiEvent.Message("Backup obnoven."))
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Import backupu selhal: ${t.message ?: t::class.java.simpleName}"))
             }
         }
     }
@@ -335,6 +522,26 @@ object RideRepository {
             val horses = HorseStorage.listHorses(context)
             val stats = computeStats(context, horses)
             _state.value = _state.value.copy(horses = horses, horseStats = stats)
+        }
+    }
+
+    private fun reloadFromStorage(context: Context, baseState: AppState = _state.value) {
+        appContext = context.applicationContext
+        ioScope.launch {
+            val horses = HorseStorage.listHorses(context)
+            val selected = SelectionStorage.getSelectedHorseId(context)
+            val stats = computeStats(context, horses)
+            val rides = listRidesInternal(context, selected)
+            val (warnM, backM) = FollowSettingsStorage.load(context)
+            _state.value =
+                baseState.copy(
+                    horses = horses,
+                    selectedHorseId = selected,
+                    horseStats = stats,
+                    rides = rides,
+                    offRouteWarnThresholdM = warnM,
+                    backOnRouteThresholdM = backM,
+                )
         }
     }
 
@@ -420,6 +627,30 @@ object RideRepository {
                 gpxFileName = it.gpxFileName,
                 metaFileName = it.metaFileName,
             )
+        }
+    }
+
+    private fun saveRideSnapshot(context: Context, snapshot: AppState, horseId: String) {
+        try {
+            val ridesDir = File(context.filesDir, "rides").apply { mkdirs() }
+            val ts = System.currentTimeMillis()
+            val horseName = snapshot.horses.firstOrNull { it.id == horseId }?.name ?: "UnknownHorse"
+            val baseName = buildRideBaseName(snapshot.points, horseName, ts)
+            val uniqueBase = ensureUniqueBaseName(ridesDir, baseName, ts)
+            val gpxName = "$uniqueBase.gpx"
+            val metaName = "$uniqueBase.meta.json"
+
+            val gpxFile = File(ridesDir, gpxName)
+            GpxStorage.writeGpx(gpxFile, snapshot.points, snapshot.rideWaypoints)
+
+            val meta = buildRideMeta(horseId, gpxName, metaName, snapshot.points)
+            RideMetaStorage.writeMeta(context, meta, metaName)
+            refreshStats(context)
+            refreshRides(context)
+
+            _events.tryEmit(UiEvent.RideSaved(gpxFile.absolutePath))
+        } catch (t: Throwable) {
+            _events.tryEmit(UiEvent.Message("Uložení selhalo: ${t.message ?: t::class.java.simpleName}"))
         }
     }
 

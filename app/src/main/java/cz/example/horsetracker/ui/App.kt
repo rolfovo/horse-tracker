@@ -3,6 +3,7 @@ package cz.example.horsetracker.ui
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import android.speech.RecognizerIntent
 import android.provider.Settings
 import android.widget.Toast
@@ -31,10 +32,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
@@ -50,19 +53,37 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun App(onRequestLocationPermission: () -> Unit) {
+fun App(
+    onRequestLocationPermission: () -> Unit,
+    onRequestBackgroundLocationPermission: () -> Unit,
+) {
     val context = LocalContext.current
     val state by RideRepository.state.collectAsState()
     val hasLocation by PermissionRepository.hasLocation.collectAsState()
+    val hasBackgroundLocation by PermissionRepository.hasBackgroundLocation.collectAsState()
 
     val selectedHorse =
         state.selectedHorseId?.let { id -> state.horses.firstOrNull { it.id == id } }
+    val appVersion =
+        remember(context) {
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+            }.getOrDefault("?")
+        }
 
-    var showHorsePicker by remember { mutableStateOf(false) }
+    val hasTrackingPermission = hasLocation && hasBackgroundLocation
+
+    var showHorsePicker by rememberSaveable { mutableStateOf(true) }
     var showRides by remember { mutableStateOf(false) }
-    var showAllRides by remember { mutableStateOf(false) }
+    var ridesFilterHorseId by remember { mutableStateOf<String?>(null) }
     var showWaypointDialog by remember { mutableStateOf(false) }
     var waypointLabel by remember { mutableStateOf("") }
+    var showStopFollowDialog by remember { mutableStateOf(false) }
+    var followHorseName by remember { mutableStateOf(selectedHorse?.name.orEmpty()) }
+    var showOfflineDialog by remember { mutableStateOf(false) }
+    var offlineRadiusKm by remember { mutableStateOf(5.0) }
+    var pendingRideExport by remember { mutableStateOf<RideSummary?>(null) }
+    var showImportBackupConfirm by remember { mutableStateOf(false) }
 
     val voiceNoteLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -82,6 +103,23 @@ fun App(onRequestLocationPermission: () -> Unit) {
                 putExtra(TrackingService.EXTRA_WAYPOINT_LABEL, text)
             }
             context.startService(intent)
+        }
+    val exportRideLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/gpx+xml")) { uri: Uri? ->
+            val ride = pendingRideExport
+            pendingRideExport = null
+            if (uri == null || ride == null) return@rememberLauncherForActivityResult
+            RideRepository.exportRideToUri(context, ride.metaFileName, uri)
+        }
+    val exportBackupLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri: Uri? ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            RideRepository.exportBackupToUri(context, uri)
+        }
+    val importBackupLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            RideRepository.importBackupFromUri(context, uri)
         }
 
     LaunchedEffect(Unit) {
@@ -110,7 +148,39 @@ fun App(onRequestLocationPermission: () -> Unit) {
             },
             onDelete = { RideRepository.deleteHorse(context, it.id) },
             onClose = if (selectedHorse != null) ({ showHorsePicker = false }) else null,
+            onExportBackup = {
+                try {
+                    exportBackupLauncher.launch("horse_tracker_backup.zip")
+                } catch (_: ActivityNotFoundException) {
+                    Toast.makeText(context, "V zařízení není dostupný správce dokumentů.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onImportBackup = { showImportBackupConfirm = true },
+            backupActionsEnabled = !state.isRecording && !state.isFollowing,
+            hasBackupData = state.horses.isNotEmpty() || state.rides.isNotEmpty(),
         )
+        if (showImportBackupConfirm) {
+            AlertDialog(
+                onDismissRequest = { showImportBackupConfirm = false },
+                title = { Text("Import backupu") },
+                text = { Text("Import přepíše stávající koně, uložené jízdy a nastavení. Pokračovat?") },
+                confirmButton = {
+                    SmallButton(
+                        onClick = {
+                            showImportBackupConfirm = false
+                            try {
+                                importBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                            } catch (_: ActivityNotFoundException) {
+                                Toast.makeText(context, "V zařízení není dostupný správce dokumentů.", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    ) { Text("Importovat") }
+                },
+                dismissButton = {
+                    SmallButton(onClick = { showImportBackupConfirm = false }) { Text("Zrušit") }
+                },
+            )
+        }
         return
     }
 
@@ -118,17 +188,31 @@ fun App(onRequestLocationPermission: () -> Unit) {
         RideListScreen(
             rides = state.rides,
             horses = state.horses,
-            selectedHorse = selectedHorse,
-            showAll = showAllRides,
+            filterHorseId = ridesFilterHorseId,
             onBack = { showRides = false },
             onLoad = {
                 RideRepository.loadRide(context, it.metaFileName)
                 showRides = false
             },
-            onDelete = { RideRepository.deleteRide(context, it.metaFileName) },
-            onToggleAll = {
-                showAllRides = !showAllRides
-                RideRepository.refreshRides(context, horseId = if (showAllRides) null else selectedHorse.id)
+            onDelete = {
+                RideRepository.deleteRide(
+                    context = context,
+                    metaFileName = it.metaFileName,
+                    horseIdFilter = ridesFilterHorseId,
+                )
+            },
+            onExport = { ride ->
+                pendingRideExport = ride
+                try {
+                    exportRideLauncher.launch(ride.gpxFileName)
+                } catch (_: ActivityNotFoundException) {
+                    pendingRideExport = null
+                    Toast.makeText(context, "V zařízení není dostupný správce dokumentů.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onSelectHorseFilter = { horseId ->
+                ridesFilterHorseId = horseId
+                RideRepository.refreshRides(context, horseId = horseId)
             },
         )
         return
@@ -160,6 +244,21 @@ fun App(onRequestLocationPermission: () -> Unit) {
                     ) { Text("Otevřít nastavení") }
                 }
                 Text("Bez povolené polohy Android nedovolí spustit location foreground service (targetSdk 34).")
+            } else if (!hasBackgroundLocation) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallButton(onClick = onRequestBackgroundLocationPermission) {
+                        Text("Poloha na pozadí")
+                    }
+                    SmallButton(
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = android.net.Uri.parse("package:${context.packageName}")
+                            }
+                            context.startActivity(intent)
+                        },
+                    ) { Text("Otevřít nastavení") }
+                }
+                Text("Pro záznam při zhasnutém displeji nebo po odchodu z aplikace je potřeba povolit i polohu na pozadí.")
             }
 
             val stats = state.horseStats[selectedHorse.id]
@@ -180,7 +279,7 @@ fun App(onRequestLocationPermission: () -> Unit) {
                         }
                         context.startForegroundService(intent)
                     },
-                    enabled = hasLocation && !state.isRecording,
+                    enabled = hasTrackingPermission && !state.isRecording,
                 ) { Text("Start") }
 
                 SmallButton(
@@ -227,25 +326,25 @@ fun App(onRequestLocationPermission: () -> Unit) {
 
                 SmallButton(
                     onClick = {
-                        showAllRides = false
-                        RideRepository.refreshRides(context, horseId = selectedHorse.id)
+                        ridesFilterHorseId = selectedHorse.id
+                        RideRepository.refreshRides(context, horseId = ridesFilterHorseId)
                         showRides = true
                     },
                 ) { Text("Jízdy") }
 
                 SmallButton(
                     onClick = {
-                        val intent = Intent(context, TrackingService::class.java).apply {
-                            action =
-                                if (state.isFollowing) {
-                                    TrackingService.ACTION_STOP_FOLLOW
-                                } else {
-                                    TrackingService.ACTION_START_FOLLOW
-                                }
+                        if (state.isFollowing) {
+                            followHorseName = selectedHorse.name
+                            showStopFollowDialog = true
+                        } else {
+                            val intent = Intent(context, TrackingService::class.java).apply {
+                                action = TrackingService.ACTION_START_FOLLOW
+                            }
+                            context.startForegroundService(intent)
                         }
-                        context.startForegroundService(intent)
                     },
-                    enabled = hasLocation && state.routeToFollow.isNotEmpty(),
+                    enabled = hasTrackingPermission && state.routeToFollow.isNotEmpty(),
                 ) { Text(if (state.isFollowing) "Stop follow" else "Follow") }
 
                 SmallButton(
@@ -267,7 +366,38 @@ fun App(onRequestLocationPermission: () -> Unit) {
                 SmallButton(onClick = { RideRepository.toggleAutoCenter() }, height = 30.dp) {
                     Text(if (state.isAutoCenter) "Auto-centr: ON" else "Auto-centr: OFF")
                 }
+                SmallButton(
+                    onClick = { showOfflineDialog = true },
+                    enabled = hasLocation,
+                    height = 30.dp,
+                ) { Text("Offline okolí") }
+                SmallButton(
+                    onClick = {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_ALL
+                        }
+                        context.startService(stopIntent)
+                        (context as? Activity)?.finishAffinity()
+                    },
+                    height = 30.dp,
+                ) { Text("KONEC") }
             }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Mimo: ${state.offRouteWarnThresholdM.toInt()}m", fontSize = 12.sp)
+                SmallButton(onClick = { RideRepository.updateOffRouteWarnThreshold(-5.0) }, height = 28.dp) { Text("-") }
+                SmallButton(onClick = { RideRepository.updateOffRouteWarnThreshold(5.0) }, height = 28.dp) { Text("+") }
+                Text("Zpět: ${state.backOnRouteThresholdM.toInt()}m", fontSize = 12.sp)
+                SmallButton(onClick = { RideRepository.updateBackOnRouteThreshold(-1.0) }, height = 28.dp) { Text("-") }
+                SmallButton(onClick = { RideRepository.updateBackOnRouteThreshold(1.0) }, height = 28.dp) { Text("+") }
+            }
+            Text(
+                text = "Verze $appVersion",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = 11.sp,
+                color = Color(0xFF5F6B76),
+                textAlign = TextAlign.End,
+            )
         }
     }
 
@@ -300,6 +430,85 @@ fun App(onRequestLocationPermission: () -> Unit) {
             },
         )
     }
+
+    if (showStopFollowDialog) {
+        AlertDialog(
+            onDismissRequest = { showStopFollowDialog = false },
+            title = { Text("Ukončit follow") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Uložit následovanou trasu?")
+                    OutlinedTextField(
+                        value = followHorseName,
+                        onValueChange = { followHorseName = it },
+                        singleLine = true,
+                        label = { Text("Jméno koně") },
+                    )
+                }
+            },
+            confirmButton = {
+                SmallButton(
+                    onClick = {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_FOLLOW
+                        }
+                        context.startService(stopIntent)
+                        RideRepository.saveCurrentRideForHorseName(context, followHorseName)
+                        showStopFollowDialog = false
+                    },
+                ) { Text("Ukončit a uložit") }
+            },
+            dismissButton = {
+                SmallButton(
+                    onClick = {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_FOLLOW
+                        }
+                        context.startService(stopIntent)
+                        showStopFollowDialog = false
+                    },
+                ) { Text("Ukončit bez uložení") }
+            },
+        )
+    }
+
+    if (showOfflineDialog) {
+        AlertDialog(
+            onDismissRequest = { showOfflineDialog = false },
+            title = { Text("Stáhnout offline mapu") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Vyber rozsah kolem aktuální polohy:")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SmallButton(
+                            onClick = { offlineRadiusKm = 2.0 },
+                            height = 32.dp,
+                        ) { Text(if (offlineRadiusKm == 2.0) "✓ 2 km" else "2 km") }
+                        SmallButton(
+                            onClick = { offlineRadiusKm = 5.0 },
+                            height = 32.dp,
+                        ) { Text(if (offlineRadiusKm == 5.0) "✓ 5 km" else "5 km") }
+                        SmallButton(
+                            onClick = { offlineRadiusKm = 10.0 },
+                            height = 32.dp,
+                        ) { Text(if (offlineRadiusKm == 10.0) "✓ 10 km" else "10 km") }
+                    }
+                }
+            },
+            confirmButton = {
+                SmallButton(
+                    onClick = {
+                        RideRepository.prefetchOfflineAroundCurrent(context, offlineRadiusKm)
+                        showOfflineDialog = false
+                    },
+                ) { Text("Stáhnout") }
+            },
+            dismissButton = {
+                SmallButton(onClick = { showOfflineDialog = false }) { Text("Zrušit") }
+            },
+        )
+    }
+
 }
 
 @Composable
@@ -321,6 +530,10 @@ private fun HorseSelectScreen(
     onAdd: (String) -> Unit,
     onDelete: (Horse) -> Unit,
     onClose: (() -> Unit)?,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+    backupActionsEnabled: Boolean,
+    hasBackupData: Boolean,
 ) {
     var newHorse by remember { mutableStateOf("") }
     var statsHorse by remember { mutableStateOf<Horse?>(null) }
@@ -369,6 +582,18 @@ private fun HorseSelectScreen(
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Přidat a vybrat") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            SmallButton(
+                onClick = onExportBackup,
+                modifier = Modifier.weight(1f),
+                enabled = backupActionsEnabled && hasBackupData,
+            ) { Text("Export backup") }
+            SmallButton(
+                onClick = onImportBackup,
+                modifier = Modifier.weight(1f),
+                enabled = backupActionsEnabled,
+            ) { Text("Import backup") }
+        }
     }
 
     val h = statsHorse
@@ -453,24 +678,28 @@ private fun HorseItem(text: String, onClick: () -> Unit, onLongClick: () -> Unit
 private fun RideListScreen(
     rides: List<RideSummary>,
     horses: List<Horse>,
-    selectedHorse: Horse,
-    showAll: Boolean,
+    filterHorseId: String?,
     onBack: () -> Unit,
     onLoad: (RideSummary) -> Unit,
     onDelete: (RideSummary) -> Unit,
-    onToggleAll: () -> Unit,
+    onExport: (RideSummary) -> Unit,
+    onSelectHorseFilter: (String?) -> Unit,
 ) {
     var toDelete by remember { mutableStateOf<RideSummary?>(null) }
+    var showFilterDialog by remember { mutableStateOf(false) }
+    val filterHorseName = horses.firstOrNull { it.id == filterHorseId }?.name
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                if (showAll) "Jízdy (všichni koně)" else "Jízdy (${selectedHorse.name})",
+                if (filterHorseId == null) "Jízdy (všichni koně)" else "Jízdy (${filterHorseName ?: "kůň"})",
                 modifier = Modifier.weight(1f),
             )
-            SmallButton(onClick = onToggleAll, height = 32.dp) { Text(if (showAll) "Jen tohoto" else "Všichni") }
+            SmallButton(onClick = { showFilterDialog = true }, height = 32.dp) {
+                Text(if (filterHorseId == null) "Všichni" else "Jen: ${filterHorseName ?: "kůň"}")
+            }
             SmallButton(onClick = onBack, height = 32.dp) { Text("Zpět") }
         }
         if (rides.isEmpty()) {
@@ -479,7 +708,7 @@ private fun RideListScreen(
             rides.take(50).forEach { r ->
                 val horseName = horses.firstOrNull { it.id == r.horseId }?.name ?: r.horseId
                 val line =
-                    (if (showAll) "$horseName • " else "") +
+                    (if (filterHorseId == null) "$horseName • " else "") +
                         "${formatDateTime(r.endTimeMs)} • ${"%.2f".format(r.distanceM / 1000.0)} km"
                 Box(
                     modifier =
@@ -492,6 +721,7 @@ private fun RideListScreen(
                         Text(line, color = Color(0xFF1C2A36), fontSize = 13.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             SmallButton(onClick = { onLoad(r) }, height = 32.dp) { Text("Nahrát") }
+                            SmallButton(onClick = { onExport(r) }, height = 32.dp) { Text("Export") }
                             SmallButton(onClick = { toDelete = r }, height = 32.dp) { Text("Smazat") }
                         }
                     }
@@ -517,6 +747,36 @@ private fun RideListScreen(
             },
             dismissButton = {
                 SmallButton(onClick = { toDelete = null }, height = 36.dp) { Text("Zrušit") }
+            },
+        )
+    }
+
+    if (showFilterDialog) {
+        AlertDialog(
+            onDismissRequest = { showFilterDialog = false },
+            title = { Text("Filtr koně") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallButton(
+                        onClick = {
+                            onSelectHorseFilter(null)
+                            showFilterDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Všichni") }
+                    horses.forEach { horse ->
+                        SmallButton(
+                            onClick = {
+                                onSelectHorseFilter(horse.id)
+                                showFilterDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(horse.name) }
+                    }
+                }
+            },
+            confirmButton = {
+                SmallButton(onClick = { showFilterDialog = false }) { Text("Zavřít") }
             },
         )
     }

@@ -10,6 +10,9 @@ import kotlin.math.sqrt
 
 object Geo {
     private const val R = 6371000.0
+    const val SIDE_LEFT = 1
+    const val SIDE_RIGHT = -1
+    const val SIDE_UNKNOWN = 0
 
     fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val dLat = (lat2 - lat1) * PI / 180.0
@@ -53,6 +56,27 @@ object Geo {
         return bestPoint
     }
 
+    fun sideOfPolyline(userLat: Double, userLon: Double, route: List<Pair<Double, Double>>): Int {
+        if (route.size < 2) return SIDE_UNKNOWN
+        var bestDist = Double.POSITIVE_INFINITY
+        var bestSide = SIDE_UNKNOWN
+
+        for (i in 1 until route.size) {
+            val a = route[i - 1]
+            val b = route[i]
+            val proj = projectPointToSegment(userLat, userLon, a.first, a.second, b.first, b.second)
+            if (proj.distanceM < bestDist) {
+                bestDist = proj.distanceM
+                bestSide = when {
+                    proj.crossZ > 0.0 -> SIDE_LEFT
+                    proj.crossZ < 0.0 -> SIDE_RIGHT
+                    else -> SIDE_UNKNOWN
+                }
+            }
+        }
+        return bestSide
+    }
+
     private fun distancePointToSegmentMeters(
         pLat: Double,
         pLon: Double,
@@ -85,7 +109,12 @@ object Geo {
         return sqrt(cx * cx + cy * cy)
     }
 
-    private data class ProjectionResult(val lat: Double, val lon: Double, val distanceM: Double)
+    private data class ProjectionResult(
+        val lat: Double,
+        val lon: Double,
+        val distanceM: Double,
+        val crossZ: Double,
+    )
 
     private fun projectPointToSegment(
         pLat: Double,
@@ -111,7 +140,7 @@ object Geo {
         val vv = vx * vx + vy * vy
         if (vv < 1e-6) {
             val d = sqrt(ax * ax + ay * ay)
-            return ProjectionResult(aLat, aLon, d)
+            return ProjectionResult(aLat, aLon, d, 0.0)
         }
 
         val t = max(0.0, min(1.0, (wx * vx + wy * vy) / vv))
@@ -120,6 +149,7 @@ object Geo {
         val d = sqrt(cx * cx + cy * cy)
         val lat = aLat + (bLat - aLat) * t
         val lon = aLon + (bLon - aLon) * t
-        return ProjectionResult(lat, lon, d)
+        val crossZ = vx * wy - vy * wx
+        return ProjectionResult(lat, lon, d, crossZ)
     }
 }

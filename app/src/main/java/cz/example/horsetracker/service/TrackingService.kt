@@ -33,6 +33,10 @@ class TrackingService : Service() {
     private var tts: TextToSpeech? = null
     private var isRecording = false
     private var isFollowing = false
+    private var offRouteWarned = false
+    private var destinationAnnounced = false
+    private var lastRouteEndKey: String? = null
+    private var locationUpdatesActive = false
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
 
     private val listener =
@@ -73,7 +77,9 @@ class TrackingService : Service() {
                 ),
             )
 
+            maybeAnnounceOffRoute(smoothed)
             maybeAnnounceNearbyWaypoint(smoothed)
+            maybeAnnounceDestination(smoothed)
         }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -92,6 +98,7 @@ class TrackingService : Service() {
             ACTION_ADD_WAYPOINT -> addWaypoint(intent.getStringExtra(EXTRA_WAYPOINT_LABEL))
             ACTION_START_FOLLOW -> startFollow()
             ACTION_STOP_FOLLOW -> stopFollow()
+            ACTION_STOP_ALL -> stopAll()
         }
         return START_STICKY
     }
@@ -102,6 +109,8 @@ class TrackingService : Service() {
             stopSelf()
             return
         }
+        RideRepository.prepareForNewActiveRide()
+        resetLocationSamples()
         isRecording = true
         RideRepository.setRecording(true)
         try {
@@ -135,7 +144,14 @@ class TrackingService : Service() {
             stopSelf()
             return
         }
+        if (!isRecording) {
+            RideRepository.prepareForNewActiveRide()
+            resetLocationSamples()
+        }
         isFollowing = true
+        offRouteWarned = false
+        destinationAnnounced = false
+        lastRouteEndKey = null
         RideRepository.setFollowing(true)
         try {
             startForeground(NOTIF_ID, buildNotification(statusText()))
@@ -151,6 +167,9 @@ class TrackingService : Service() {
 
     private fun stopFollow() {
         isFollowing = false
+        offRouteWarned = false
+        destinationAnnounced = false
+        lastRouteEndKey = null
         RideRepository.setFollowing(false)
         if (!isRecording) {
             stopLocation()
@@ -175,6 +194,7 @@ class TrackingService : Service() {
     }
 
     private fun requestLocation() {
+        if (locationUpdatesActive) return
         val lm = locationManager ?: return
         try {
             // Network provider často dělá "odbočky" / skoky. Primárně jedeme GPS.
@@ -185,6 +205,7 @@ class TrackingService : Service() {
             } else {
                 lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 3f, listener)
             }
+            locationUpdatesActive = true
         } catch (_: SecurityException) {
             // Permission missing -> nic nedělej.
         }
@@ -195,7 +216,28 @@ class TrackingService : Service() {
         try {
             lm.removeUpdates(listener)
         } catch (_: SecurityException) {
+        } finally {
+            locationUpdatesActive = false
         }
+    }
+
+    private fun resetLocationSamples() {
+        lastLocation = null
+        lastAcceptedLocation = null
+    }
+
+    private fun stopAll() {
+        isRecording = false
+        isFollowing = false
+        offRouteWarned = false
+        destinationAnnounced = false
+        lastRouteEndKey = null
+        RideRepository.setRecording(false)
+        RideRepository.setFollowing(false)
+        stopLocation()
+        releaseWakeLock()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun buildNotification(text: String): Notification {
@@ -333,8 +375,90 @@ class TrackingService : Service() {
             if (now - last < repeatCooldownMs) return@forEach
 
             announcedWaypointAtMs[key] = now
-            tts?.speak(label, TextToSpeech.QUEUE_ADD, null, key)
+            val spokenLabel =
+                if (state.isFollowing && state.isReversed) {
+                    reverseDirectionWords(label)
+                } else {
+                    label
+                }
+            tts?.speak(spokenLabel, TextToSpeech.QUEUE_ADD, null, key)
         }
+    }
+
+    private fun maybeAnnounceOffRoute(location: Location) {
+        if (!isFollowing) return
+        val state = RideRepository.state.value
+        val offRoute = state.offRouteMeters
+        val warnThreshold = state.offRouteWarnThresholdM
+        val backThreshold = state.backOnRouteThresholdM
+
+        if (!offRouteWarned && offRoute >= warnThreshold) {
+            offRouteWarned = true
+            val sideText =
+                when (Geo.sideOfPolyline(location.latitude, location.longitude, state.mapState.followRoute)) {
+                    Geo.SIDE_LEFT -> " vlevo od trasy"
+                    Geo.SIDE_RIGHT -> " vpravo od trasy"
+                    else -> ""
+                }
+            tts?.speak(
+                "Pozor, jste mimo trasu o více než ${warnThreshold.toInt()} metrů$sideText.",
+                TextToSpeech.QUEUE_ADD,
+                null,
+                "offroute_warn",
+            )
+            return
+        }
+
+        // Po návratu blízko trasy znovu povol další off-route upozornění.
+        if (offRouteWarned && offRoute <= backThreshold) {
+            offRouteWarned = false
+            tts?.speak(
+                "Jste zpět na trase.",
+                TextToSpeech.QUEUE_ADD,
+                null,
+                "back_on_route",
+            )
+        }
+    }
+
+    private fun maybeAnnounceDestination(location: Location) {
+        if (!isFollowing) return
+        val route = RideRepository.state.value.mapState.followRoute
+        val end = route.lastOrNull() ?: return
+        val endKey = "${end.first}_${end.second}"
+        if (lastRouteEndKey != endKey) {
+            lastRouteEndKey = endKey
+            destinationAnnounced = false
+        }
+        if (destinationAnnounced) return
+        val distanceToEnd = Geo.haversineMeters(location.latitude, location.longitude, end.first, end.second)
+        if (distanceToEnd > 20.0) return
+        destinationAnnounced = true
+        tts?.speak(
+            "Dojeli jste do cíle.",
+            TextToSpeech.QUEUE_ADD,
+            null,
+            "destination_reached",
+        )
+    }
+
+    private fun reverseDirectionWords(input: String): String {
+        var text = input
+        // Použij placeholdery, aby nedošlo k dvojitému přepsání.
+        text = text.replace(Regex("(?i)\\bdoleva\\b"), "__TMP_DOLEVA__")
+        text = text.replace(Regex("(?i)\\bdoprava\\b"), "__TMP_DOPRAVA__")
+        text = text.replace(Regex("(?i)\\bvlevo\\b"), "__TMP_VLEVO__")
+        text = text.replace(Regex("(?i)\\bvpravo\\b"), "__TMP_VPRAVO__")
+        text = text.replace(Regex("(?i)\\bleft\\b"), "__TMP_LEFT__")
+        text = text.replace(Regex("(?i)\\bright\\b"), "__TMP_RIGHT__")
+
+        text = text.replace("__TMP_DOLEVA__", "doprava")
+        text = text.replace("__TMP_DOPRAVA__", "doleva")
+        text = text.replace("__TMP_VLEVO__", "vpravo")
+        text = text.replace("__TMP_VPRAVO__", "vlevo")
+        text = text.replace("__TMP_LEFT__", "right")
+        text = text.replace("__TMP_RIGHT__", "left")
+        return text
     }
 
     companion object {
@@ -344,6 +468,7 @@ class TrackingService : Service() {
         const val EXTRA_WAYPOINT_LABEL = "cz.example.horsetracker.extra.WAYPOINT_LABEL"
         const val ACTION_START_FOLLOW = "cz.example.horsetracker.action.START_FOLLOW"
         const val ACTION_STOP_FOLLOW = "cz.example.horsetracker.action.STOP_FOLLOW"
+        const val ACTION_STOP_ALL = "cz.example.horsetracker.action.STOP_ALL"
 
         private const val CHANNEL_ID = "tracking"
         private const val NOTIF_ID = 1001

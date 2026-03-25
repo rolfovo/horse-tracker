@@ -88,7 +88,7 @@ private const val SOURCE_SNAP = "snap"
 private fun updateMap(mapView: MapView, mapState: MapState, autoCenter: Boolean, controller: MapController) {
     mapView.getMapAsync { map ->
         if (map.style == null) {
-            map.setStyle(buildOsmRasterStyle()) { style ->
+            map.setStyle(buildOsmRasterStyle(mapView.context)) { style ->
                 attachLayers(style)
                 render(style, mapState)
             }
@@ -136,7 +136,9 @@ private fun distanceMetersApprox(lat1: Double, lon1: Double, lat2: Double, lon2:
     return kotlin.math.sqrt(dx * dx + dy * dy)
 }
 
-private fun buildOsmRasterStyle(): Style.Builder {
+private fun buildOsmRasterStyle(context: Context): Style.Builder {
+    val localTilesRoot = "${context.filesDir.absolutePath.replace("\\", "/")}/offline_tiles"
+    val localTemplate = "file://$localTilesRoot/{z}/{x}/{y}.png"
     val styleJson =
         """
         {
@@ -144,7 +146,7 @@ private fun buildOsmRasterStyle(): Style.Builder {
           "sources": {
             "osm": {
               "type": "raster",
-              "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              "tiles": ["$localTemplate", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
               "tileSize": 256,
               "attribution": "© OpenStreetMap contributors"
             }
