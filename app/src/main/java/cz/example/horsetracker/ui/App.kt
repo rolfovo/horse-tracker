@@ -79,6 +79,7 @@ fun App(
     var ridesFilterHorseId by remember { mutableStateOf<String?>(null) }
     var showWaypointDialog by remember { mutableStateOf(false) }
     var waypointLabel by remember { mutableStateOf("") }
+    var showStopRecordingDialog by remember { mutableStateOf(false) }
     var showStopFollowDialog by remember { mutableStateOf(false) }
     var followHorseName by remember { mutableStateOf(selectedHorse?.name.orEmpty()) }
     var showOfflineDialog by remember { mutableStateOf(false) }
@@ -285,10 +286,14 @@ fun App(
 
                 SmallButton(
                     onClick = {
-                        val intent = Intent(context, TrackingService::class.java).apply {
-                            action = TrackingService.ACTION_STOP_RECORDING
+                        if (state.points.isNotEmpty()) {
+                            showStopRecordingDialog = true
+                        } else {
+                            val intent = Intent(context, TrackingService::class.java).apply {
+                                action = TrackingService.ACTION_STOP_RECORDING
+                            }
+                            context.startService(intent)
                         }
-                        context.startService(intent)
                     },
                     enabled = state.isRecording,
                 ) { Text("Stop") }
@@ -320,11 +325,6 @@ fun App(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton(
-                    onClick = { RideRepository.saveCurrentRide(context) },
-                    enabled = state.points.isNotEmpty(),
-                ) { Text("Uložit") }
-
                 SmallButton(
                     onClick = {
                         ridesFilterHorseId = selectedHorse.id
@@ -428,6 +428,37 @@ fun App(
             },
             dismissButton = {
                 SmallButton(onClick = { showWaypointDialog = false }) { Text("Zrušit") }
+            },
+        )
+    }
+
+    if (showStopRecordingDialog) {
+        AlertDialog(
+            onDismissRequest = { showStopRecordingDialog = false },
+            title = { Text("Ukončit záznam") },
+            text = { Text("Chceš právě zaznamenanou trasu uložit?") },
+            confirmButton = {
+                SmallButton(
+                    onClick = {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_RECORDING
+                        }
+                        context.startService(stopIntent)
+                        RideRepository.saveCurrentRide(context)
+                        showStopRecordingDialog = false
+                    },
+                ) { Text("Ukončit a uložit") }
+            },
+            dismissButton = {
+                SmallButton(
+                    onClick = {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_RECORDING
+                        }
+                        context.startService(stopIntent)
+                        showStopRecordingDialog = false
+                    },
+                ) { Text("Jen ukončit") }
             },
         )
     }
