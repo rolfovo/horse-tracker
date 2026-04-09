@@ -72,6 +72,7 @@ fun App(
         }
 
     val hasTrackingPermission = hasLocation && hasBackgroundLocation
+    val canStartRecording = hasLocation && !state.isRecording
 
     var showHorsePicker by rememberSaveable { mutableStateOf(true) }
     var showRides by remember { mutableStateOf(false) }
@@ -279,7 +280,7 @@ fun App(
                         }
                         context.startForegroundService(intent)
                     },
-                    enabled = hasTrackingPermission && !state.isRecording,
+                    enabled = canStartRecording,
                 ) { Text("Start") }
 
                 SmallButton(

@@ -109,7 +109,7 @@ class TrackingService : Service() {
             stopSelf()
             return
         }
-        RideRepository.prepareForNewActiveRide()
+        RideRepository.prepareForNewActiveRide(clearFollowRoute = true)
         resetLocationSamples()
         isRecording = true
         RideRepository.setRecording(true)
@@ -145,7 +145,7 @@ class TrackingService : Service() {
             return
         }
         if (!isRecording) {
-            RideRepository.prepareForNewActiveRide()
+            RideRepository.prepareForNewActiveRide(clearFollowRoute = false)
             resetLocationSamples()
         }
         isFollowing = true

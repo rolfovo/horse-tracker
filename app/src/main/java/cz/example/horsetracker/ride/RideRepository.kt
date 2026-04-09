@@ -266,12 +266,16 @@ object RideRepository {
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
     }
 
-    fun prepareForNewActiveRide() {
+    fun prepareForNewActiveRide(clearFollowRoute: Boolean = false) {
         val prev = _state.value
         val next =
             prev.copy(
+                isFollowing = if (clearFollowRoute) false else prev.isFollowing,
+                isReversed = if (clearFollowRoute) false else prev.isReversed,
                 points = emptyList(),
                 rideWaypoints = emptyList(),
+                routeWaypoints = if (clearFollowRoute) emptyList() else prev.routeWaypoints,
+                routeToFollow = if (clearFollowRoute) emptyList() else prev.routeToFollow,
                 lastSpeedMps = 0.0,
                 lastAccuracyM = 0.0,
                 lastHeadingDeg = null,
@@ -285,6 +289,7 @@ object RideRepository {
                         snapLat = null,
                         snapLon = null,
                         segments = emptyList(),
+                        followRoute = if (clearFollowRoute) emptyList() else effectiveFollowRoute(prev),
                     ),
             )
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
