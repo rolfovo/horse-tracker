@@ -13,6 +13,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import androidx.core.app.NotificationCompat
 import cz.example.horsetracker.MainActivity
@@ -37,6 +38,7 @@ class TrackingService : Service() {
     private var destinationAnnounced = false
     private var lastRouteEndKey: String? = null
     private var locationUpdatesActive = false
+    private var recordingWarmupUntilElapsedMs = 0L
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
 
     private val listener =
@@ -63,9 +65,13 @@ class TrackingService : Service() {
                     if (d > 1.0) prev.bearingTo(smoothed).toDouble() else null
                 } else {
                     null
-                }
+            }
 
             lastAcceptedLocation = Location(smoothed)
+            if (isRecording && SystemClock.elapsedRealtime() < recordingWarmupUntilElapsedMs) {
+                return@LocationListener
+            }
+
             RideRepository.onLocation(
                 TrackPoint(
                     lat = smoothed.latitude,
@@ -111,6 +117,7 @@ class TrackingService : Service() {
         }
         RideRepository.prepareForNewActiveRide(clearFollowRoute = true)
         resetLocationSamples()
+        recordingWarmupUntilElapsedMs = SystemClock.elapsedRealtime() + RECORDING_WARMUP_MS
         isRecording = true
         RideRepository.setRecording(true)
         try {
@@ -127,6 +134,7 @@ class TrackingService : Service() {
 
     private fun stopRecording() {
         isRecording = false
+        recordingWarmupUntilElapsedMs = 0L
         RideRepository.setRecording(false)
         if (!isFollowing) {
             stopLocation()
@@ -229,6 +237,7 @@ class TrackingService : Service() {
     private fun stopAll() {
         isRecording = false
         isFollowing = false
+        recordingWarmupUntilElapsedMs = 0L
         offRouteWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
@@ -472,5 +481,6 @@ class TrackingService : Service() {
 
         private const val CHANNEL_ID = "tracking"
         private const val NOTIF_ID = 1001
+        private const val RECORDING_WARMUP_MS = 5_000L
     }
 }
