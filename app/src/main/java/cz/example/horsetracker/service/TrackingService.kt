@@ -39,6 +39,7 @@ class TrackingService : Service() {
     private var lastRouteEndKey: String? = null
     private var locationUpdatesActive = false
     private var recordingWarmupUntilElapsedMs = 0L
+    private var waitingForFirstRecordedPointAfterWarmup = false
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
 
     private val listener =
@@ -82,6 +83,7 @@ class TrackingService : Service() {
                     headingDeg = headingDeg,
                 ),
             )
+            waitingForFirstRecordedPointAfterWarmup = false
 
             maybeAnnounceOffRoute(smoothed)
             maybeAnnounceNearbyWaypoint(smoothed)
@@ -118,6 +120,7 @@ class TrackingService : Service() {
         RideRepository.prepareForNewActiveRide(clearFollowRoute = true)
         resetLocationSamples()
         recordingWarmupUntilElapsedMs = SystemClock.elapsedRealtime() + RECORDING_WARMUP_MS
+        waitingForFirstRecordedPointAfterWarmup = true
         isRecording = true
         RideRepository.setRecording(true)
         try {
@@ -135,6 +138,7 @@ class TrackingService : Service() {
     private fun stopRecording() {
         isRecording = false
         recordingWarmupUntilElapsedMs = 0L
+        waitingForFirstRecordedPointAfterWarmup = false
         RideRepository.setRecording(false)
         if (!isFollowing) {
             stopLocation()
@@ -238,6 +242,7 @@ class TrackingService : Service() {
         isRecording = false
         isFollowing = false
         recordingWarmupUntilElapsedMs = 0L
+        waitingForFirstRecordedPointAfterWarmup = false
         offRouteWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
@@ -319,6 +324,13 @@ class TrackingService : Service() {
         if (!location.hasAccuracy()) return false
         val acc = location.accuracy
         if (acc <= 0f) return false
+
+        if (isRecording &&
+            waitingForFirstRecordedPointAfterWarmup &&
+            SystemClock.elapsedRealtime() >= recordingWarmupUntilElapsedMs
+        ) {
+            return acc <= 120f
+        }
 
         // hrubý filtr proti šumu a velkým skokům
         if (acc > 50f) return false
