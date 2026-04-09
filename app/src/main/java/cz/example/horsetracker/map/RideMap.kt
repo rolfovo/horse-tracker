@@ -84,6 +84,8 @@ private const val SOURCE_FOLLOW = "follow"
 private const val SOURCE_USER = "user"
 private const val SOURCE_USER_ARROW = "user_arrow"
 private const val SOURCE_SNAP = "snap"
+private val DEFAULT_MAP_CENTER = LatLng(49.8175, 15.4730)
+private const val DEFAULT_MAP_ZOOM = 7.2
 
 private fun updateMap(mapView: MapView, mapState: MapState, autoCenter: Boolean, controller: MapController) {
     mapView.getMapAsync { map ->
@@ -109,17 +111,39 @@ private fun updateMap(mapView: MapView, mapState: MapState, autoCenter: Boolean,
 
         val lat = mapState.userLat
         val lon = mapState.userLon
+        if (!controller.hasInitialCamera) {
+            when {
+                lat != null && lon != null -> {
+                    controller.hasInitialCamera = true
+                    controller.lastCameraUpdateMs = SystemClock.elapsedRealtime()
+                    controller.lastCameraLat = lat
+                    controller.lastCameraLon = lon
+                    map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15.5))
+                }
+                mapState.followRoute.size >= 2 -> {
+                    val bounds = buildBounds(mapState.followRoute)
+                    if (bounds != null) {
+                        map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
+                        controller.hasInitialCamera = true
+                    }
+                }
+                else -> {
+                    map.moveCamera(CameraUpdateFactory.newLatLngZoom(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM))
+                    controller.hasInitialCamera = true
+                }
+            }
+        }
+
         if (autoCenter && lat != null && lon != null) {
             // Nehebej mapou při každém GPS bodu. Jen úvodní centrování + následně throttle.
             val now = SystemClock.elapsedRealtime()
-            val shouldInitial = !controller.hasInitialCamera
             val movedEnough =
                 controller.lastCameraLat == null ||
                     controller.lastCameraLon == null ||
                     distanceMetersApprox(lat, lon, controller.lastCameraLat!!, controller.lastCameraLon!!) > 8.0
             val throttleOk = (now - controller.lastCameraUpdateMs) > 2500
 
-            if (shouldInitial || (movedEnough && throttleOk)) {
+            if (movedEnough && throttleOk) {
                 controller.hasInitialCamera = true
                 controller.lastCameraUpdateMs = now
                 controller.lastCameraLat = lat
@@ -144,15 +168,28 @@ private fun buildOsmRasterStyle(context: Context): Style.Builder {
         {
           "version": 8,
           "sources": {
-            "osm": {
+            "osm_online": {
               "type": "raster",
-              "tiles": ["$localTemplate", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
               "tileSize": 256,
               "attribution": "© OpenStreetMap contributors"
+            },
+            "osm_offline": {
+              "type": "raster",
+              "tiles": ["$localTemplate"],
+              "tileSize": 256
             }
           },
           "layers": [
-            {"id": "osm", "type": "raster", "source": "osm"}
+            {
+              "id": "base_background",
+              "type": "background",
+              "paint": {
+                "background-color": "#efe7db"
+              }
+            },
+            {"id": "osm_online", "type": "raster", "source": "osm_online"},
+            {"id": "osm_offline", "type": "raster", "source": "osm_offline"}
           ]
         }
         """.trimIndent()
