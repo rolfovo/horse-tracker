@@ -1,5 +1,6 @@
 package cz.example.horsetracker.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -16,6 +18,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import cz.example.horsetracker.MainActivity
 import cz.example.horsetracker.R
 import cz.example.horsetracker.geo.Geo
@@ -27,6 +30,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 class TrackingService : Service() {
+    private val maxSeedLocationAgeMs = 10 * 60 * 1000L
     private var locationManager: LocationManager? = null
     private var lastLocation: Location? = null
     private var lastAcceptedLocation: Location? = null
@@ -194,7 +198,7 @@ class TrackingService : Service() {
     }
 
     private fun addWaypoint(label: String?) {
-        val loc = lastLocation ?: return
+        val loc = lastAcceptedLocation ?: lastLocation ?: return
         RideRepository.addWaypoint(
             Waypoint(
                 lat = loc.latitude,
@@ -208,20 +212,63 @@ class TrackingService : Service() {
     private fun requestLocation() {
         if (locationUpdatesActive) return
         val lm = locationManager ?: return
-        try {
-            // Network provider často dělá "odbočky" / skoky. Primárně jedeme GPS.
-            val gpsEnabled = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
-            if (gpsEnabled) {
-                // Pro jízdu na koni typicky stačí 1s/1m. Uprav podle potřeby.
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, listener)
-            } else {
-                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 3f, listener)
-            }
-            locationUpdatesActive = true
-        } catch (_: SecurityException) {
-            // Permission missing -> nic nedělej.
+        val gpsEnabled = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+        val networkEnabled = runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        val passiveEnabled = runCatching { lm.isProviderEnabled(LocationManager.PASSIVE_PROVIDER) }.getOrDefault(false)
+        val hasFineLocation = hasFineLocation()
+
+        val requested = ArrayList<Boolean>(3)
+        if (gpsEnabled && hasFineLocation) {
+            requested += requestProviderUpdates(lm, LocationManager.GPS_PROVIDER, 1000L, 1f)
         }
+        if (networkEnabled) {
+            requested += requestProviderUpdates(lm, LocationManager.NETWORK_PROVIDER, 1500L, 3f)
+        }
+        if (passiveEnabled) {
+            requested += requestProviderUpdates(lm, LocationManager.PASSIVE_PROVIDER, 2000L, 0f)
+        }
+
+        locationUpdatesActive = requested.any { it }
+        seedLastKnownLocation(lm, gpsEnabled, networkEnabled, passiveEnabled, hasFineLocation)
     }
+
+    private fun requestProviderUpdates(
+        locationManager: LocationManager,
+        provider: String,
+        minTimeMs: Long,
+        minDistanceM: Float,
+    ): Boolean =
+        runCatching {
+            locationManager.requestLocationUpdates(provider, minTimeMs, minDistanceM, listener)
+            true
+        }.getOrDefault(false)
+
+    private fun seedLastKnownLocation(
+        locationManager: LocationManager,
+        gpsEnabled: Boolean,
+        networkEnabled: Boolean,
+        passiveEnabled: Boolean,
+        hasFineLocation: Boolean,
+    ) {
+        val now = System.currentTimeMillis()
+        val candidates =
+            buildList {
+                if (gpsEnabled && hasFineLocation) add(getLastKnownLocation(locationManager, LocationManager.GPS_PROVIDER))
+                if (networkEnabled) add(getLastKnownLocation(locationManager, LocationManager.NETWORK_PROVIDER))
+                if (passiveEnabled) add(getLastKnownLocation(locationManager, LocationManager.PASSIVE_PROVIDER))
+            }.filterNotNull()
+                .filter { now - it.time <= maxSeedLocationAgeMs }
+                .sortedWith(compareBy<Location> { it.accuracy }.thenByDescending { it.time })
+
+        val best = candidates.firstOrNull() ?: return
+        listener.onLocationChanged(best)
+    }
+
+    private fun getLastKnownLocation(locationManager: LocationManager, provider: String): Location? =
+        runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
+
+    private fun hasFineLocation(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
     private fun stopLocation() {
         val lm = locationManager ?: return
@@ -325,6 +372,11 @@ class TrackingService : Service() {
         val acc = location.accuracy
         if (acc <= 0f) return false
 
+        val prev = lastAcceptedLocation
+        if (prev == null) {
+            return acc <= 120f
+        }
+
         if (isRecording &&
             waitingForFirstRecordedPointAfterWarmup &&
             SystemClock.elapsedRealtime() >= recordingWarmupUntilElapsedMs
@@ -335,7 +387,6 @@ class TrackingService : Service() {
         // hrubý filtr proti šumu a velkým skokům
         if (acc > 50f) return false
 
-        val prev = lastAcceptedLocation ?: return true
         val dtMs = location.time - prev.time
         if (dtMs < 500) return false
 
