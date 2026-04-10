@@ -1,7 +1,11 @@
 package cz.example.horsetracker.ride
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.Context
 import android.net.Uri
+import androidx.core.content.FileProvider
 import cz.example.horsetracker.geo.Geo
 import cz.example.horsetracker.map.OfflineTilePrefetcher
 import kotlinx.coroutines.CoroutineScope
@@ -462,6 +466,45 @@ object RideRepository {
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Export selhal: ${t.message ?: t::class.java.simpleName}"))
             }
+        }
+    }
+
+    fun emailRideGpx(context: Context, metaFileName: String, emailAddress: String) {
+        try {
+            val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName }
+            if (meta == null) {
+                _events.tryEmit(UiEvent.Message("Odeslání selhalo: jízda nebyla nalezena."))
+                return
+            }
+
+            val sourceFile = File(File(context.filesDir, "rides"), meta.gpxFileName)
+            if (!sourceFile.exists()) {
+                _events.tryEmit(UiEvent.Message("Odeslání selhalo: GPX soubor neexistuje."))
+                return
+            }
+
+            val gpxUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", sourceFile)
+            val chooser =
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "application/gpx+xml"
+                        putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
+                        putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
+                        putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
+                        putExtra(Intent.EXTRA_STREAM, gpxUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    "Odeslat GPX mailem",
+                )
+
+            if (context !is Activity) {
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+        } catch (_: ActivityNotFoundException) {
+            _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
+        } catch (t: Throwable) {
+            _events.tryEmit(UiEvent.Message("Odeslání GPX selhalo: ${t.message ?: t::class.java.simpleName}"))
         }
     }
 

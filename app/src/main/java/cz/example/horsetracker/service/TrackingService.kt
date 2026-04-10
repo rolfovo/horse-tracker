@@ -44,6 +44,7 @@ class TrackingService : Service() {
     private var locationUpdatesActive = false
     private var recordingWarmupUntilElapsedMs = 0L
     private var waitingForFirstRecordedPointAfterWarmup = false
+    private var autoFinishTriggered = false
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
 
     private val listener =
@@ -89,6 +90,7 @@ class TrackingService : Service() {
             )
             waitingForFirstRecordedPointAfterWarmup = false
 
+            maybeAutoFinishLoop(smoothed)
             maybeAnnounceOffRoute(smoothed)
             maybeAnnounceNearbyWaypoint(smoothed)
             maybeAnnounceDestination(smoothed)
@@ -125,6 +127,7 @@ class TrackingService : Service() {
         resetLocationSamples()
         recordingWarmupUntilElapsedMs = SystemClock.elapsedRealtime() + RECORDING_WARMUP_MS
         waitingForFirstRecordedPointAfterWarmup = true
+        autoFinishTriggered = false
         isRecording = true
         RideRepository.setRecording(true)
         try {
@@ -143,6 +146,7 @@ class TrackingService : Service() {
         isRecording = false
         recordingWarmupUntilElapsedMs = 0L
         waitingForFirstRecordedPointAfterWarmup = false
+        autoFinishTriggered = false
         RideRepository.setRecording(false)
         if (!isFollowing) {
             stopLocation()
@@ -290,6 +294,7 @@ class TrackingService : Service() {
         isFollowing = false
         recordingWarmupUntilElapsedMs = 0L
         waitingForFirstRecordedPointAfterWarmup = false
+        autoFinishTriggered = false
         offRouteWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
@@ -514,6 +519,22 @@ class TrackingService : Service() {
         )
     }
 
+    private fun maybeAutoFinishLoop(location: Location) {
+        if (!isRecording || isFollowing || autoFinishTriggered) return
+
+        val snapshot = RideRepository.state.value
+        val startPoint = snapshot.points.firstOrNull() ?: return
+        val durationMs = (location.time - startPoint.timeEpochMs).coerceAtLeast(0L)
+        if (durationMs < AUTO_FINISH_MIN_DURATION_MS) return
+
+        val distanceToStartM = Geo.haversineMeters(location.latitude, location.longitude, startPoint.lat, startPoint.lon)
+        if (distanceToStartM > AUTO_FINISH_RADIUS_M) return
+
+        autoFinishTriggered = true
+        RideRepository.saveCurrentRide(applicationContext)
+        stopRecording()
+    }
+
     private fun reverseDirectionWords(input: String): String {
         var text = input
         // Použij placeholdery, aby nedošlo k dvojitému přepsání.
@@ -545,5 +566,7 @@ class TrackingService : Service() {
         private const val CHANNEL_ID = "tracking"
         private const val NOTIF_ID = 1001
         private const val RECORDING_WARMUP_MS = 5_000L
+        private const val AUTO_FINISH_RADIUS_M = 100.0
+        private const val AUTO_FINISH_MIN_DURATION_MS = 10 * 60 * 1000L
     }
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -211,6 +213,13 @@ fun App(
                     pendingRideExport = null
                     Toast.makeText(context, "V zařízení není dostupný správce dokumentů.", Toast.LENGTH_SHORT).show()
                 }
+            },
+            onEmail = { ride ->
+                RideRepository.emailRideGpx(
+                    context = context,
+                    metaFileName = ride.metaFileName,
+                    emailAddress = "rolfovo@gmail.com",
+                )
             },
             onSelectHorseFilter = { horseId ->
                 ridesFilterHorseId = horseId
@@ -693,6 +702,28 @@ private fun SmallButton(
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
+private fun SmallHoldButton(
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    height: Dp = 32.dp,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(
+        modifier =
+            modifier
+                .height(height)
+                .background(color = Color(0xFF355F58), shape = RoundedCornerShape(18.dp))
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun HorseItem(text: String, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier =
@@ -715,9 +746,11 @@ private fun RideListScreen(
     onLoad: (RideSummary) -> Unit,
     onDelete: (RideSummary) -> Unit,
     onExport: (RideSummary) -> Unit,
+    onEmail: (RideSummary) -> Unit,
     onSelectHorseFilter: (String?) -> Unit,
 ) {
     var toDelete by remember { mutableStateOf<RideSummary?>(null) }
+    var emailRide by remember { mutableStateOf<RideSummary?>(null) }
     var showFilterDialog by remember { mutableStateOf(false) }
     val filterHorseName = horses.firstOrNull { it.id == filterHorseId }?.name
     Column(
@@ -753,7 +786,13 @@ private fun RideListScreen(
                         Text(line, color = Color(0xFF1C2A36), fontSize = 13.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             SmallButton(onClick = { onLoad(r) }, height = 32.dp) { Text("Nahrát") }
-                            SmallButton(onClick = { onExport(r) }, height = 32.dp) { Text("Export") }
+                            SmallHoldButton(
+                                onClick = { onExport(r) },
+                                onLongClick = { emailRide = r },
+                                height = 32.dp,
+                            ) {
+                                Text("Export", color = Color.White)
+                            }
                             SmallButton(onClick = { toDelete = r }, height = 32.dp) { Text("Smazat") }
                         }
                     }
@@ -779,6 +818,31 @@ private fun RideListScreen(
             },
             dismissButton = {
                 SmallButton(onClick = { toDelete = null }, height = 36.dp) { Text("Zrušit") }
+            },
+        )
+    }
+
+    val rideForEmail = emailRide
+    if (rideForEmail != null) {
+        AlertDialog(
+            onDismissRequest = { emailRide = null },
+            title = { Text("Odeslat GPX mailem?") },
+            text = {
+                Text(
+                    "Poslat GPX této jízdy na rolfovo@gmail.com?\n\nPodržení tlačítka Export otevře tuto volbu i příště.",
+                )
+            },
+            confirmButton = {
+                SmallButton(
+                    onClick = {
+                        onEmail(rideForEmail)
+                        emailRide = null
+                    },
+                    height = 36.dp,
+                ) { Text("Odeslat") }
+            },
+            dismissButton = {
+                SmallButton(onClick = { emailRide = null }, height = 36.dp) { Text("Zrušit") }
             },
         )
     }
