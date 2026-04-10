@@ -2,6 +2,7 @@ package cz.example.horsetracker.ride
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.Context
 import android.net.Uri
@@ -484,18 +485,35 @@ object RideRepository {
             }
 
             val gpxUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", sourceFile)
-            val chooser =
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).apply {
-                        type = "application/gpx+xml"
-                        putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
-                        putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
-                        putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
-                        putExtra(Intent.EXTRA_STREAM, gpxUri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    },
-                    "Odeslat GPX mailem",
+            val sendIntent =
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
+                    putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
+                    putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
+                    putExtra(Intent.EXTRA_STREAM, gpxUri)
+                    clipData = ClipData.newUri(context.contentResolver, sourceFile.name, gpxUri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    selector =
+                        Intent(Intent.ACTION_SENDTO).apply {
+                            data = Uri.parse("mailto:")
+                        }
+                }
+
+            val handlers = context.packageManager.queryIntentActivities(sendIntent, 0)
+            if (handlers.isEmpty()) {
+                _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
+                return
+            }
+            handlers.forEach { resolveInfo ->
+                context.grantUriPermission(
+                    resolveInfo.activityInfo.packageName,
+                    gpxUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
+            }
+
+            val chooser = Intent.createChooser(sendIntent, "Odeslat GPX mailem")
 
             if (context !is Activity) {
                 chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
