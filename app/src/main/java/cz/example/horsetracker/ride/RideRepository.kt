@@ -46,7 +46,7 @@ object RideRepository {
             val stats = computeStats(context, horses)
             val rides = listRidesInternal(context, selected)
             val (warnM, backM) = FollowSettingsStorage.load(context)
-            _state.value =
+            val baseState =
                 _state.value.copy(
                     horses = horses,
                     selectedHorseId = selected,
@@ -55,11 +55,17 @@ object RideRepository {
                     offRouteWarnThresholdM = warnM,
                     backOnRouteThresholdM = backM,
                 )
+            val restored = restoreDraftIfAvailable(context, baseState)
+            _state.value = restored
+            if (restored.points.isNotEmpty()) {
+                _events.tryEmit(UiEvent.Message("Byla obnovena nedokončená jízda po pádu nebo zavření aplikace."))
+            }
         }
     }
 
     fun selectHorse(context: Context, horseId: String) {
         SelectionStorage.setSelectedHorseId(context, horseId)
+        clearDisplayedRide()
         _state.value = _state.value.copy(selectedHorseId = horseId)
         refreshRides(context)
         refreshStats(context)
@@ -206,6 +212,7 @@ object RideRepository {
                 followRoute = route,
             ),
         )
+        persistDraftAsync(_state.value)
     }
 
     fun addWaypoint(waypoint: Waypoint) {
@@ -216,6 +223,7 @@ object RideRepository {
             rideWaypoints = newWaypoints,
             mapState = prev.mapState.copy(waypoints = next.waypoints),
         )
+        persistDraftAsync(_state.value)
     }
 
     fun setRouteToFollow(points: List<Pair<Double, Double>>) {
@@ -269,6 +277,7 @@ object RideRepository {
                     ),
             )
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
+        clearDraftAsync()
     }
 
     fun prepareForNewActiveRide(clearFollowRoute: Boolean = false) {
@@ -298,6 +307,7 @@ object RideRepository {
                     ),
             )
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
+        clearDraftAsync()
     }
 
     fun saveCurrentRide(context: Context) {
@@ -559,6 +569,56 @@ object RideRepository {
         }
     }
 
+    fun importRideFromUri(context: Context, horseId: String, sourceUri: Uri) {
+        ioScope.launch {
+            val horse = HorseStorage.listHorses(context).firstOrNull { it.id == horseId }
+            if (horse == null) {
+                _events.tryEmit(UiEvent.Message("Import selhal: kůň nebyl nalezen."))
+                return@launch
+            }
+
+            val tempFile = File.createTempFile("horse_tracker_import_", ".gpx", context.cacheDir)
+            try {
+                val input =
+                    context.contentResolver.openInputStream(sourceUri)
+                        ?: run {
+                            _events.tryEmit(UiEvent.Message("Import selhal: nelze otevřít GPX soubor."))
+                            return@launch
+                        }
+                input.use { source ->
+                    tempFile.outputStream().use { target -> source.copyTo(target) }
+                }
+
+                val ride = GpxStorage.readGpx(tempFile)
+                if (ride.points.isEmpty()) {
+                    _events.tryEmit(UiEvent.Message("Import selhal: GPX neobsahuje trasové body."))
+                    return@launch
+                }
+
+                val ridesDir = File(context.filesDir, "rides").apply { mkdirs() }
+                val ts = ride.points.firstOrNull()?.timeEpochMs ?: System.currentTimeMillis()
+                val baseName = buildRideBaseName(ride.points, horse.name, ts)
+                val uniqueBase = ensureUniqueBaseName(ridesDir, baseName, ts)
+                val gpxName = "$uniqueBase.gpx"
+                val metaName = "$uniqueBase.meta.json"
+
+                val gpxFile = File(ridesDir, gpxName)
+                GpxStorage.writeGpx(gpxFile, ride.points, ride.waypoints)
+
+                val meta = buildRideMeta(horse.id, gpxName, metaName, ride.points)
+                RideMetaStorage.writeMeta(context, meta, metaName)
+                refreshStats(context)
+                refreshRides(context)
+
+                _events.tryEmit(UiEvent.Message("GPX importován ke koni ${horse.name}."))
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Import GPX selhal: ${t.message ?: t::class.java.simpleName}"))
+            } finally {
+                tempFile.delete()
+            }
+        }
+    }
+
     private fun buildSegments(points: List<TrackPoint>): List<SpeedSegment> {
         if (points.size < 2) return emptyList()
         val segments = ArrayList<SpeedSegment>(points.size - 1)
@@ -711,6 +771,7 @@ object RideRepository {
 
             val meta = buildRideMeta(horseId, gpxName, metaName, snapshot.points)
             RideMetaStorage.writeMeta(context, meta, metaName)
+            DraftRideStorage.clear(context)
             refreshStats(context)
             refreshRides(context)
 
@@ -740,6 +801,105 @@ object RideRepository {
         if (!gpx2.exists() && !meta2.exists()) return withTime
 
         return "$withTime ${ts % 1000}"
+    }
+
+    private fun restoreDraftIfAvailable(context: Context, baseState: AppState): AppState {
+        val draft = DraftRideStorage.readDraft(context) ?: return baseState
+        if (draft.points.isEmpty()) {
+            DraftRideStorage.clear(context)
+            return baseState
+        }
+
+        val selectedHorseId =
+            draft.selectedHorseId?.takeIf { horseId -> baseState.horses.any { it.id == horseId } }
+                ?: baseState.selectedHorseId
+
+        val points = draft.points
+        val last = points.last()
+        val distance = calculateDistance(points)
+        val durationMs = (last.timeEpochMs - points.first().timeEpochMs).coerceAtLeast(0L)
+        val avgSpeed = if (durationMs > 0L) distance / (durationMs.toDouble() / 1000.0) else 0.0
+        val next =
+            baseState.copy(
+                selectedHorseId = selectedHorseId,
+                points = points,
+                rideWaypoints = draft.waypoints,
+                lastSpeedMps = last.speedMps,
+                lastAccuracyM = last.accuracyM,
+                lastHeadingDeg = last.headingDeg,
+                currentDistanceM = distance,
+                currentDurationMs = durationMs,
+                currentAvgSpeedMps = avgSpeed,
+                mapState =
+                    baseState.mapState.copy(
+                        userLat = last.lat,
+                        userLon = last.lon,
+                        userHeadingDeg = last.headingDeg,
+                        snapLat = null,
+                        snapLon = null,
+                        segments = buildSegments(points),
+                    ),
+            )
+        return next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
+    }
+
+    private fun calculateDistance(points: List<TrackPoint>): Double {
+        if (points.size < 2) return 0.0
+        var total = 0.0
+        for (i in 1 until points.size) {
+            val previous = points[i - 1]
+            val current = points[i]
+            total += Geo.haversineMeters(previous.lat, previous.lon, current.lat, current.lon)
+        }
+        return total
+    }
+
+    private fun persistDraftAsync(snapshot: AppState) {
+        val context = appContext ?: return
+        ioScope.launch {
+            if (snapshot.points.isEmpty() && snapshot.rideWaypoints.isEmpty()) {
+                DraftRideStorage.clear(context)
+            } else {
+                DraftRideStorage.writeDraft(context, snapshot.selectedHorseId, snapshot.points, snapshot.rideWaypoints)
+            }
+        }
+    }
+
+    private fun clearDraftAsync() {
+        val context = appContext ?: return
+        ioScope.launch { DraftRideStorage.clear(context) }
+    }
+
+    private fun clearDisplayedRide() {
+        val prev = _state.value
+        val next =
+            prev.copy(
+                isRecording = false,
+                isFollowing = false,
+                isReversed = false,
+                points = emptyList(),
+                rideWaypoints = emptyList(),
+                routeWaypoints = emptyList(),
+                routeToFollow = emptyList(),
+                lastSpeedMps = 0.0,
+                lastAccuracyM = 0.0,
+                lastHeadingDeg = null,
+                currentDistanceM = 0.0,
+                currentDurationMs = 0L,
+                currentAvgSpeedMps = 0.0,
+                offRouteMeters = 0.0,
+                mapState =
+                    prev.mapState.copy(
+                        userHeadingDeg = null,
+                        snapLat = null,
+                        snapLon = null,
+                        segments = emptyList(),
+                        waypoints = emptyList(),
+                        followRoute = emptyList(),
+                    ),
+            )
+        _state.value = next
+        clearDraftAsync()
     }
 
     private fun sanitizeName(name: String?): String {

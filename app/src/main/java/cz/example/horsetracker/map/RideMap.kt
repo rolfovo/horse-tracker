@@ -12,7 +12,9 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import cz.example.horsetracker.geo.Geo
 import cz.example.horsetracker.ride.MapState
+import cz.example.horsetracker.ride.Waypoint
 import com.mapbox.geojson.Feature
 import com.mapbox.geojson.FeatureCollection
 import com.mapbox.geojson.LineString
@@ -34,7 +36,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @Composable
-fun RideMap(modifier: Modifier = Modifier, mapState: MapState, autoCenter: Boolean) {
+fun RideMap(modifier: Modifier = Modifier, mapState: MapState, autoCenter: Boolean, onWaypointTap: (Waypoint) -> Unit = {}) {
     val context = LocalContext.current
     val mapView = rememberMapViewWithLifecycle(context)
     val controller = remember { MapController() }
@@ -42,7 +44,7 @@ fun RideMap(modifier: Modifier = Modifier, mapState: MapState, autoCenter: Boole
     AndroidView(
         modifier = modifier,
         factory = { mapView },
-        update = { view -> updateMap(view, mapState, autoCenter, controller) },
+        update = { view -> updateMap(view, mapState, autoCenter, controller, onWaypointTap) },
     )
 }
 
@@ -52,6 +54,9 @@ private class MapController {
     var lastCameraLat: Double? = null
     var lastCameraLon: Double? = null
     var lastFollowHash: Int = 0
+    var latestState: MapState = MapState()
+    var onWaypointTap: ((Waypoint) -> Unit)? = null
+    var clickListenerAttached = false
 }
 
 @Composable
@@ -87,8 +92,37 @@ private const val SOURCE_SNAP = "snap"
 private val DEFAULT_MAP_CENTER = LatLng(49.8175, 15.4730)
 private const val DEFAULT_MAP_ZOOM = 7.2
 
-private fun updateMap(mapView: MapView, mapState: MapState, autoCenter: Boolean, controller: MapController) {
+private fun updateMap(
+    mapView: MapView,
+    mapState: MapState,
+    autoCenter: Boolean,
+    controller: MapController,
+    onWaypointTap: (Waypoint) -> Unit,
+) {
     mapView.getMapAsync { map ->
+        controller.latestState = mapState
+        controller.onWaypointTap = onWaypointTap
+        if (!controller.clickListenerAttached) {
+            map.addOnMapClickListener { latLng ->
+                val waypoint =
+                    controller.latestState.waypoints.minByOrNull { wp ->
+                        Geo.haversineMeters(latLng.latitude, latLng.longitude, wp.lat, wp.lon)
+                    }
+                if (waypoint != null) {
+                    val distance = Geo.haversineMeters(latLng.latitude, latLng.longitude, waypoint.lat, waypoint.lon)
+                    if (distance <= 35.0) {
+                        controller.onWaypointTap?.invoke(waypoint)
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            controller.clickListenerAttached = true
+        }
+
         if (map.style == null) {
             map.setStyle(buildOsmRasterStyle(mapView.context)) { style ->
                 attachLayers(style)
@@ -208,10 +242,13 @@ private fun attachLayers(style: Style) {
         Expression.interpolate(
             Expression.linear(),
             Expression.get("speed_mps"),
-            Expression.stop(0.0, Expression.color(Color.argb(255, 33, 150, 243))),  // blue
-            Expression.stop(3.0, Expression.color(Color.argb(255, 76, 175, 80))),   // green
-            Expression.stop(6.0, Expression.color(Color.argb(255, 255, 193, 7))),   // amber
-            Expression.stop(10.0, Expression.color(Color.argb(255, 244, 67, 54))),  // red
+            Expression.stop(0.0, Expression.color(Color.argb(255, 35, 107, 173))),   // very slow
+            Expression.stop(1.2, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~4.3 km/h
+            Expression.stop(1.9, Expression.color(Color.argb(255, 92, 184, 92))),    // walk upper ~6.8 km/h
+            Expression.stop(2.7, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~9.7 km/h
+            Expression.stop(3.8, Expression.color(Color.argb(255, 240, 183, 63))),   // trot upper ~13.7 km/h
+            Expression.stop(4.7, Expression.color(Color.argb(255, 235, 126, 63))),   // canter start ~16.9 km/h
+            Expression.stop(5.6, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~20 km/h
         )
 
     style.addLayer(

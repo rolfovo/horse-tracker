@@ -14,7 +14,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,7 +35,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -87,6 +85,7 @@ fun App(
     var showOfflineDialog by remember { mutableStateOf(false) }
     var offlineRadiusKm by remember { mutableStateOf(5.0) }
     var pendingRideExport by remember { mutableStateOf<RideSummary?>(null) }
+    var pendingHorseImport by remember { mutableStateOf<Horse?>(null) }
     var showImportBackupConfirm by remember { mutableStateOf(false) }
 
     val voiceNoteLauncher =
@@ -125,6 +124,13 @@ fun App(
             if (uri == null) return@rememberLauncherForActivityResult
             RideRepository.importBackupFromUri(context, uri)
         }
+    val importRideLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            val horse = pendingHorseImport
+            pendingHorseImport = null
+            if (uri == null || horse == null) return@rememberLauncherForActivityResult
+            RideRepository.importRideFromUri(context, horse.id, uri)
+        }
 
     LaunchedEffect(Unit) {
         RideRepository.events.collect { e ->
@@ -152,6 +158,15 @@ fun App(
             },
             onDelete = { RideRepository.deleteHorse(context, it.id) },
             onClose = if (selectedHorse != null) ({ showHorsePicker = false }) else null,
+            onImportGpx = { horse ->
+                pendingHorseImport = horse
+                try {
+                    importRideLauncher.launch(arrayOf("application/gpx+xml", "application/octet-stream", "text/xml", "application/xml"))
+                } catch (_: ActivityNotFoundException) {
+                    pendingHorseImport = null
+                    Toast.makeText(context, "V zařízení není dostupný správce dokumentů.", Toast.LENGTH_SHORT).show()
+                }
+            },
             onExportBackup = {
                 try {
                     exportBackupLauncher.launch("horse_tracker_backup.zip")
@@ -239,6 +254,17 @@ fun App(
             modifier = Modifier.weight(1f),
             mapState = state.mapState,
             autoCenter = state.isAutoCenter,
+            onWaypointTap = { waypoint ->
+                val label = waypoint.label?.trim().orEmpty()
+                if (label.isNotEmpty()) {
+                    val intent = Intent(context, TrackingService::class.java).apply {
+                        action = TrackingService.ACTION_SPEAK_WAYPOINT
+                        putExtra(TrackingService.EXTRA_WAYPOINT_LABEL, label)
+                        putExtra(TrackingService.EXTRA_SPEAK_REVERSED, state.isFollowing && state.isReversed)
+                    }
+                    context.startService(intent)
+                }
+            },
         )
 
         Column(modifier = Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -571,6 +597,7 @@ private fun HorseSelectScreen(
     onAdd: (String) -> Unit,
     onDelete: (Horse) -> Unit,
     onClose: (() -> Unit)?,
+    onImportGpx: (Horse) -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
     backupActionsEnabled: Boolean,
@@ -601,6 +628,7 @@ private fun HorseSelectScreen(
                         onLongClick = { statsHorse = h },
                         modifier = Modifier.weight(1f),
                     )
+                    SmallButton(onClick = { onImportGpx(h) }, height = 36.dp) { Text("Import GPX") }
                     SmallButton(onClick = { deleteHorse = h }, height = 36.dp) { Text("Smazat") }
                 }
             }
@@ -702,28 +730,6 @@ private fun SmallButton(
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
-private fun SmallHoldButton(
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    height: Dp = 32.dp,
-    content: @Composable BoxScope.() -> Unit,
-) {
-    Box(
-        modifier =
-            modifier
-                .height(height)
-                .background(color = Color(0xFF355F58), shape = RoundedCornerShape(18.dp))
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        content()
-    }
-}
-
-@Composable
-@OptIn(ExperimentalFoundationApi::class)
 private fun HorseItem(text: String, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier =
@@ -786,13 +792,8 @@ private fun RideListScreen(
                         Text(line, color = Color(0xFF1C2A36), fontSize = 13.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             SmallButton(onClick = { onLoad(r) }, height = 32.dp) { Text("Nahrát") }
-                            SmallHoldButton(
-                                onClick = { onExport(r) },
-                                onLongClick = { emailRide = r },
-                                height = 32.dp,
-                            ) {
-                                Text("Export", color = Color.White)
-                            }
+                            SmallButton(onClick = { onExport(r) }, height = 32.dp) { Text("Export") }
+                            SmallButton(onClick = { emailRide = r }, height = 32.dp) { Text("E-mail") }
                             SmallButton(onClick = { toDelete = r }, height = 32.dp) { Text("Smazat") }
                         }
                     }
@@ -829,7 +830,7 @@ private fun RideListScreen(
             title = { Text("Odeslat GPX mailem?") },
             text = {
                 Text(
-                    "Poslat GPX této jízdy na rolfovo@gmail.com?\n\nPodržení tlačítka Export otevře tuto volbu i příště.",
+                    "Poslat GPX této jízdy na rolfovo@gmail.com?",
                 )
             },
             confirmButton = {

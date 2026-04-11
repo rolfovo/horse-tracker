@@ -36,6 +36,8 @@ class TrackingService : Service() {
     private var lastAcceptedLocation: Location? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingSpeech: Pair<String, String>? = null
     private var isRecording = false
     private var isFollowing = false
     private var offRouteWarned = false
@@ -110,6 +112,7 @@ class TrackingService : Service() {
             ACTION_START_RECORDING -> startRecording()
             ACTION_STOP_RECORDING -> stopRecording()
             ACTION_ADD_WAYPOINT -> addWaypoint(intent.getStringExtra(EXTRA_WAYPOINT_LABEL))
+            ACTION_SPEAK_WAYPOINT -> speakWaypoint(intent.getStringExtra(EXTRA_WAYPOINT_LABEL), intent.getBooleanExtra(EXTRA_SPEAK_REVERSED, false))
             ACTION_START_FOLLOW -> startFollow()
             ACTION_STOP_FOLLOW -> stopFollow()
             ACTION_STOP_ALL -> stopAll()
@@ -369,6 +372,8 @@ class TrackingService : Service() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+        ttsReady = false
+        pendingSpeech = null
         super.onDestroy()
     }
 
@@ -422,12 +427,31 @@ class TrackingService : Service() {
     }
 
     private fun initTts() {
+        ttsReady = false
         tts =
             TextToSpeech(this) { status ->
                 if (status == TextToSpeech.SUCCESS) {
+                    ttsReady = true
                     tts?.language = Locale("cs", "CZ")
+                    pendingSpeech?.let { (text, utteranceId) ->
+                        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                        pendingSpeech = null
+                    }
                 }
             }
+    }
+
+    private fun speakWaypoint(label: String?, reverse: Boolean) {
+        val trimmed = label?.trim().orEmpty()
+        if (trimmed.isEmpty()) return
+
+        val spoken = if (reverse) reverseDirectionWords(trimmed) else trimmed
+        val utteranceId = "tap_${System.currentTimeMillis()}"
+        if (ttsReady) {
+            tts?.speak(spoken, TextToSpeech.QUEUE_ADD, null, utteranceId)
+        } else {
+            pendingSpeech = spoken to utteranceId
+        }
     }
 
     private fun maybeAnnounceNearbyWaypoint(location: Location) {
@@ -559,6 +583,8 @@ class TrackingService : Service() {
         const val ACTION_STOP_RECORDING = "cz.example.horsetracker.action.STOP_RECORDING"
         const val ACTION_ADD_WAYPOINT = "cz.example.horsetracker.action.ADD_WAYPOINT"
         const val EXTRA_WAYPOINT_LABEL = "cz.example.horsetracker.extra.WAYPOINT_LABEL"
+        const val ACTION_SPEAK_WAYPOINT = "cz.example.horsetracker.action.SPEAK_WAYPOINT"
+        const val EXTRA_SPEAK_REVERSED = "cz.example.horsetracker.extra.SPEAK_REVERSED"
         const val ACTION_START_FOLLOW = "cz.example.horsetracker.action.START_FOLLOW"
         const val ACTION_STOP_FOLLOW = "cz.example.horsetracker.action.STOP_FOLLOW"
         const val ACTION_STOP_ALL = "cz.example.horsetracker.action.STOP_ALL"
