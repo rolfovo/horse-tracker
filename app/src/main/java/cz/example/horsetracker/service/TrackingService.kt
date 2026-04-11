@@ -461,7 +461,7 @@ class TrackingService : Service() {
         if (state.waypoints.isEmpty()) return
 
         val now = System.currentTimeMillis()
-        val triggerDistanceM = 28.0
+        val triggerDistanceM = 10.0
         val repeatCooldownMs = 10 * 60 * 1000L
 
         state.waypoints.forEach { wp ->
