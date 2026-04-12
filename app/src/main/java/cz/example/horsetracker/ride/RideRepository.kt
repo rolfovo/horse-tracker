@@ -229,7 +229,14 @@ object RideRepository {
     fun setRouteToFollow(points: List<Pair<Double, Double>>) {
         val prev = _state.value
         val next = prev.copy(routeToFollow = points)
-        _state.value = next.copy(mapState = next.mapState.copy(followRoute = effectiveFollowRoute(next)))
+        _state.value =
+            next.copy(
+                mapState =
+                    next.mapState.copy(
+                        followRoute = effectiveFollowRoute(next),
+                        followSegments = effectiveFollowSegments(next),
+                    ),
+            )
     }
 
     fun toggleFollow() {
@@ -251,7 +258,14 @@ object RideRepository {
     fun toggleReverse() {
         val prev = _state.value
         val next = prev.copy(isReversed = !prev.isReversed)
-        _state.value = next.copy(mapState = next.mapState.copy(followRoute = effectiveFollowRoute(next)))
+        _state.value =
+            next.copy(
+                mapState =
+                    next.mapState.copy(
+                        followRoute = effectiveFollowRoute(next),
+                        followSegments = effectiveFollowSegments(next),
+                    ),
+            )
     }
 
     fun resetRide() {
@@ -290,6 +304,7 @@ object RideRepository {
                 rideWaypoints = emptyList(),
                 routeWaypoints = if (clearFollowRoute) emptyList() else prev.routeWaypoints,
                 routeToFollow = if (clearFollowRoute) emptyList() else prev.routeToFollow,
+                routeFollowSegments = if (clearFollowRoute) emptyList() else prev.routeFollowSegments,
                 lastSpeedMps = 0.0,
                 lastAccuracyM = 0.0,
                 lastHeadingDeg = null,
@@ -304,6 +319,7 @@ object RideRepository {
                         snapLon = null,
                         segments = emptyList(),
                         followRoute = if (clearFollowRoute) emptyList() else effectiveFollowRoute(prev),
+                        followSegments = if (clearFollowRoute) emptyList() else effectiveFollowSegments(prev),
                     ),
             )
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
@@ -405,6 +421,7 @@ object RideRepository {
                     rideWaypoints = emptyList(),
                     routeWaypoints = ride.waypoints,
                     routeToFollow = ride.points.map { it.lat to it.lon },
+                    routeFollowSegments = buildSegments(ride.points),
                     lastSpeedMps = 0.0,
                     lastAccuracyM = 0.0,
                     lastHeadingDeg = null,
@@ -426,6 +443,7 @@ object RideRepository {
                         next.mapState.copy(
                             waypoints = next.waypoints,
                             followRoute = effectiveFollowRoute(next),
+                            followSegments = effectiveFollowSegments(next),
                         ),
                 )
         }
@@ -495,35 +513,43 @@ object RideRepository {
             }
 
             val gpxUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", sourceFile)
-            val sendIntent =
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "*/*"
-                    putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
-                    putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
-                    putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
-                    putExtra(Intent.EXTRA_STREAM, gpxUri)
-                    clipData = ClipData.newUri(context.contentResolver, sourceFile.name, gpxUri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    selector =
-                        Intent(Intent.ACTION_SENDTO).apply {
-                            data = Uri.parse("mailto:")
-                        }
-                }
-
-            val handlers = context.packageManager.queryIntentActivities(sendIntent, 0)
-            if (handlers.isEmpty()) {
+            val mailHandlers =
+                context.packageManager.queryIntentActivities(
+                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")),
+                    0,
+                )
+            if (mailHandlers.isEmpty()) {
                 _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
                 return
             }
-            handlers.forEach { resolveInfo ->
-                context.grantUriPermission(
-                    resolveInfo.activityInfo.packageName,
-                    gpxUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-            }
 
-            val chooser = Intent.createChooser(sendIntent, "Odeslat GPX mailem")
+            val targetIntents =
+                mailHandlers.map { resolveInfo ->
+                    context.grantUriPermission(
+                        resolveInfo.activityInfo.packageName,
+                        gpxUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                    Intent(Intent.ACTION_SEND).apply {
+                        `package` = resolveInfo.activityInfo.packageName
+                        type = "*/*"
+                        putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
+                        putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
+                        putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
+                        putExtra(Intent.EXTRA_STREAM, gpxUri)
+                        clipData = ClipData.newUri(context.contentResolver, sourceFile.name, gpxUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+
+            val chooser =
+                if (targetIntents.size == 1) {
+                    targetIntents.first()
+                } else {
+                    Intent.createChooser(targetIntents.first(), "Odeslat GPX mailem").apply {
+                        putExtra(Intent.EXTRA_INITIAL_INTENTS, targetIntents.drop(1).toTypedArray())
+                    }
+                }
 
             if (context !is Activity) {
                 chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -643,6 +669,22 @@ object RideRepository {
         return if (state.isReversed) base.asReversed() else base
     }
 
+    private fun effectiveFollowSegments(state: AppState): List<SpeedSegment> {
+        val base = state.routeFollowSegments
+        return if (!state.isReversed) {
+            base
+        } else {
+            base.asReversed().map { segment ->
+                segment.copy(
+                    startLat = segment.endLat,
+                    startLon = segment.endLon,
+                    endLat = segment.startLat,
+                    endLon = segment.startLon,
+                )
+            }
+        }
+    }
+
     private fun refreshStats(context: Context) {
         ioScope.launch {
             val horses = HorseStorage.listHorses(context)
@@ -673,6 +715,7 @@ object RideRepository {
 
     private fun computeStats(context: Context, horses: List<Horse>): Map<String, RideStats> {
         val metas = RideMetaStorage.listMetas(context)
+        val ridesDir = File(context.filesDir, "rides")
         val byHorse = metas.groupBy { it.horseId }
         val out = HashMap<String, RideStats>()
         horses.forEach { h ->
@@ -691,7 +734,12 @@ object RideRepository {
                     totalAvgSpeedWeighted += m.avgSpeedMps * dur.toDouble()
                     totalTimeForAvg += dur.toDouble()
                 }
-                if (m.maxSpeedMps > maxSpeed) maxSpeed = m.maxSpeedMps
+                val rideMax =
+                    runCatching {
+                        val gpxFile = File(ridesDir, m.gpxFileName)
+                        if (gpxFile.exists()) computeReliableMaxSpeed(GpxStorage.readGpx(gpxFile).points) else m.maxSpeedMps
+                    }.getOrDefault(m.maxSpeedMps)
+                if (rideMax > maxSpeed) maxSpeed = rideMax
             }
             val avgSpeed = if (totalTimeForAvg > 0.0) totalAvgSpeedWeighted / totalTimeForAvg else 0.0
             out[h.id] =
@@ -715,15 +763,14 @@ object RideRepository {
         val start = points.firstOrNull()?.timeEpochMs ?: 0L
         val end = points.lastOrNull()?.timeEpochMs ?: start
         var distance = 0.0
-        var maxSpeed = 0.0
         for (i in 1 until points.size) {
             val a = points[i - 1]
             val b = points[i]
             distance += Geo.haversineMeters(a.lat, a.lon, b.lat, b.lon)
-            if (b.speedMps > maxSpeed) maxSpeed = b.speedMps
         }
         val durationMs = (end - start).coerceAtLeast(1L)
         val avgSpeed = distance / (durationMs.toDouble() / 1000.0)
+        val maxSpeed = computeReliableMaxSpeed(points)
         return RideMetaStorage.RideMeta(
             horseId = horseId,
             startTimeMs = start,
@@ -735,6 +782,36 @@ object RideRepository {
             gpxFileName = gpxName,
             metaFileName = metaName,
         )
+    }
+
+    private fun computeReliableMaxSpeed(points: List<TrackPoint>): Double {
+        if (points.size < 2) return 0.0
+
+        val segmentSpeeds = ArrayList<Double>(points.size - 1)
+        for (i in 1 until points.size) {
+            val previous = points[i - 1]
+            val current = points[i]
+            val dtMs = (current.timeEpochMs - previous.timeEpochMs).coerceAtLeast(0L)
+            if (dtMs < 500L || dtMs > 20_000L) continue
+
+            val distance = Geo.haversineMeters(previous.lat, previous.lon, current.lat, current.lon)
+            val segmentSpeed = distance / (dtMs.toDouble() / 1000.0)
+            val maxAccuracy = maxOf(previous.accuracyM, current.accuracyM)
+            if (maxAccuracy > 50.0) continue
+            if (segmentSpeed in 0.0..8.0) {
+                segmentSpeeds += segmentSpeed
+            }
+        }
+
+        if (segmentSpeeds.isEmpty()) return 0.0
+        if (segmentSpeeds.size < 3) return segmentSpeeds.maxOrNull() ?: 0.0
+
+        var maxRolling = 0.0
+        for (i in 0..segmentSpeeds.size - 3) {
+            val rolling = (segmentSpeeds[i] + segmentSpeeds[i + 1] + segmentSpeeds[i + 2]) / 3.0
+            if (rolling > maxRolling) maxRolling = rolling
+        }
+        return maxRolling
     }
 
     private fun listRidesInternal(context: Context, selectedHorseId: String?): List<RideSummary> {

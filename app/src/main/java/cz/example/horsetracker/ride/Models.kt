@@ -49,6 +49,7 @@ data class MapState(
     val segments: List<SpeedSegment> = emptyList(),
     val waypoints: List<Waypoint> = emptyList(),
     val followRoute: List<Pair<Double, Double>> = emptyList(),
+    val followSegments: List<SpeedSegment> = emptyList(),
 )
 
 data class SpeedSegment(
@@ -72,6 +73,7 @@ data class AppState(
     val rideWaypoints: List<Waypoint> = emptyList(),
     val routeWaypoints: List<Waypoint> = emptyList(),
     val routeToFollow: List<Pair<Double, Double>> = emptyList(),
+    val routeFollowSegments: List<SpeedSegment> = emptyList(),
     val lastSpeedMps: Double = 0.0,
     val lastAccuracyM: Double = 0.0,
     val lastHeadingDeg: Double? = null,

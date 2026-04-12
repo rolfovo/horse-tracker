@@ -263,7 +263,7 @@ private fun attachLayers(style: Style) {
         LineLayer("follow_line", SOURCE_FOLLOW).withProperties(
             PropertyFactory.lineWidth(5f),
             PropertyFactory.lineOpacity(0.95f),
-            PropertyFactory.lineColor(Expression.color(Color.argb(255, 255, 64, 129))),
+            PropertyFactory.lineColor(speedColor),
         ),
     )
 
@@ -319,17 +319,18 @@ private fun render(style: Style, state: MapState) {
     val wpFeatures = state.waypoints.map { w -> Feature.fromGeometry(Point.fromLngLat(w.lon, w.lat)) }
     style.getSourceAs<GeoJsonSource>(SOURCE_WAYPOINTS)?.setGeoJson(FeatureCollection.fromFeatures(wpFeatures))
 
-    val followFeature =
-        if (state.followRoute.size >= 2) {
+    val followFeatures =
+        state.followSegments.map { seg ->
             Feature.fromGeometry(
-                LineString.fromLngLats(state.followRoute.map { (lat, lon) -> Point.fromLngLat(lon, lat) }),
-            )
-        } else {
-            null
+                LineString.fromLngLats(
+                    listOf(
+                        Point.fromLngLat(seg.startLon, seg.startLat),
+                        Point.fromLngLat(seg.endLon, seg.endLat),
+                    ),
+                ),
+            ).apply { addNumberProperty("speed_mps", seg.speedMps) }
         }
-    style.getSourceAs<GeoJsonSource>(SOURCE_FOLLOW)?.setGeoJson(
-        FeatureCollection.fromFeatures(listOfNotNull(followFeature)),
-    )
+    style.getSourceAs<GeoJsonSource>(SOURCE_FOLLOW)?.setGeoJson(FeatureCollection.fromFeatures(followFeatures))
 
     val userFeature =
         if (state.userLat != null && state.userLon != null) {

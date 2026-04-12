@@ -1,6 +1,7 @@
 package cz.example.horsetracker.ride
 
 import android.util.Xml
+import cz.example.horsetracker.geo.Geo
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.io.StringWriter
@@ -134,7 +135,7 @@ object GpxStorage {
             event = parser.next()
         }
 
-        return Ride(points = points, waypoints = waypoints)
+        return Ride(points = enrichPoints(points), waypoints = waypoints)
     }
 
     private fun formatTime(epochMs: Long): String =
@@ -142,6 +143,33 @@ object GpxStorage {
 
     private fun parseTime(s: String): Long =
         runCatching { Instant.parse(s).toEpochMilli() }.getOrDefault(0L)
+
+    private fun enrichPoints(points: List<TrackPoint>): List<TrackPoint> {
+        if (points.isEmpty()) return points
+
+        val out = ArrayList<TrackPoint>(points.size)
+        points.forEachIndexed { index, point ->
+            if (index == 0) {
+                out.add(point)
+            } else {
+                val prev = out[index - 1]
+                val derivedSpeed =
+                    if (point.speedMps > 0.0) {
+                        point.speedMps
+                    } else {
+                        val dtMs = (point.timeEpochMs - prev.timeEpochMs).coerceAtLeast(0L)
+                        if (dtMs <= 0L) {
+                            0.0
+                        } else {
+                            val distance = Geo.haversineMeters(prev.lat, prev.lon, point.lat, point.lon)
+                            (distance / (dtMs.toDouble() / 1000.0)).coerceIn(0.0, 8.0)
+                        }
+                    }
+                out.add(point.copy(speedMps = derivedSpeed))
+            }
+        }
+        return out
+    }
 
     private fun escapeXml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
