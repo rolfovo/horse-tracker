@@ -24,7 +24,7 @@ import java.util.Date
 import java.util.Locale
 
 object RideRepository {
-    private val _state = MutableStateFlow(AppState())
+    private val _state = MutableStateFlow(AppState(isLoadingData = true))
     val state = _state.asStateFlow()
     private var appContext: Context? = null
 
@@ -40,6 +40,7 @@ object RideRepository {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        _state.value = _state.value.copy(isLoadingData = true)
         ioScope.launch {
             val horses = HorseStorage.listHorses(context)
             val selected = SelectionStorage.getSelectedHorseId(context)
@@ -48,6 +49,7 @@ object RideRepository {
             val (warnM, backM) = FollowSettingsStorage.load(context)
             val baseState =
                 _state.value.copy(
+                    isLoadingData = false,
                     horses = horses,
                     selectedHorseId = selected,
                     horseStats = stats,
@@ -235,6 +237,7 @@ object RideRepository {
                     next.mapState.copy(
                         followRoute = effectiveFollowRoute(next),
                         followSegments = effectiveFollowSegments(next),
+                        followActive = next.isFollowing,
                     ),
             )
     }
@@ -248,22 +251,23 @@ object RideRepository {
                 offRouteMeters = if (nextFollowing) prev.offRouteMeters else 0.0,
                 mapState =
                     if (nextFollowing) {
-                        prev.mapState
+                        prev.mapState.copy(followActive = true)
                     } else {
-                        prev.mapState.copy(snapLat = null, snapLon = null)
+                        prev.mapState.copy(snapLat = null, snapLon = null, followActive = false)
                     },
             )
     }
 
-    fun toggleReverse() {
+    fun setReverseMode(isReversed: Boolean) {
         val prev = _state.value
-        val next = prev.copy(isReversed = !prev.isReversed)
+        val next = prev.copy(isReversed = isReversed)
         _state.value =
             next.copy(
                 mapState =
                     next.mapState.copy(
                         followRoute = effectiveFollowRoute(next),
                         followSegments = effectiveFollowSegments(next),
+                        followActive = next.isFollowing,
                     ),
             )
     }
@@ -320,6 +324,7 @@ object RideRepository {
                         segments = emptyList(),
                         followRoute = if (clearFollowRoute) emptyList() else effectiveFollowRoute(prev),
                         followSegments = if (clearFollowRoute) emptyList() else effectiveFollowSegments(prev),
+                        followActive = if (clearFollowRoute) false else prev.isFollowing,
                     ),
             )
         _state.value = next.copy(mapState = next.mapState.copy(waypoints = next.waypoints))
@@ -444,6 +449,7 @@ object RideRepository {
                             waypoints = next.waypoints,
                             followRoute = effectiveFollowRoute(next),
                             followSegments = effectiveFollowSegments(next),
+                            followActive = next.isFollowing,
                         ),
                 )
         }
@@ -587,7 +593,7 @@ object RideRepository {
         ioScope.launch {
             try {
                 AppBackupStorage.import(context, sourceUri)
-                reloadFromStorage(context, AppState())
+                reloadFromStorage(context, _state.value)
                 _events.tryEmit(UiEvent.Message("Backup obnoven."))
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Import backupu selhal: ${t.message ?: t::class.java.simpleName}"))
@@ -695,6 +701,7 @@ object RideRepository {
 
     private fun reloadFromStorage(context: Context, baseState: AppState = _state.value) {
         appContext = context.applicationContext
+        _state.value = baseState.copy(isLoadingData = true)
         ioScope.launch {
             val horses = HorseStorage.listHorses(context)
             val selected = SelectionStorage.getSelectedHorseId(context)
@@ -703,6 +710,7 @@ object RideRepository {
             val (warnM, backM) = FollowSettingsStorage.load(context)
             _state.value =
                 baseState.copy(
+                    isLoadingData = false,
                     horses = horses,
                     selectedHorseId = selected,
                     horseStats = stats,
@@ -973,6 +981,8 @@ object RideRepository {
                         segments = emptyList(),
                         waypoints = emptyList(),
                         followRoute = emptyList(),
+                        followSegments = emptyList(),
+                        followActive = false,
                     ),
             )
         _state.value = next

@@ -50,6 +50,7 @@ data class MapState(
     val waypoints: List<Waypoint> = emptyList(),
     val followRoute: List<Pair<Double, Double>> = emptyList(),
     val followSegments: List<SpeedSegment> = emptyList(),
+    val followActive: Boolean = false,
 )
 
 data class SpeedSegment(
@@ -61,6 +62,7 @@ data class SpeedSegment(
 )
 
 data class AppState(
+    val isLoadingData: Boolean = false,
     val isRecording: Boolean = false,
     val isFollowing: Boolean = false,
     val isReversed: Boolean = false,

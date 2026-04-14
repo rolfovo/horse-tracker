@@ -72,7 +72,7 @@ fun App(
         }
 
     val hasTrackingPermission = hasLocation && hasBackgroundLocation
-    val canStartRecording = hasLocation && !state.isRecording
+    val canStartRecording = hasLocation && !state.isRecording && !state.isFollowing
 
     var showHorsePicker by rememberSaveable { mutableStateOf(true) }
     var showRides by remember { mutableStateOf(false) }
@@ -148,6 +148,7 @@ fun App(
         HorseSelectScreen(
             horses = state.horses,
             horseStats = state.horseStats,
+            isLoadingData = state.isLoadingData,
             onSelect = {
                 RideRepository.selectHorse(context, it.id)
                 showHorsePicker = false
@@ -384,9 +385,13 @@ fun App(
                 ) { Text(if (state.isFollowing) "Stop follow" else "Follow") }
 
                 SmallButton(
-                    onClick = { RideRepository.toggleReverse() },
+                    onClick = { RideRepository.setReverseMode(false) },
                     enabled = state.routeToFollow.isNotEmpty(),
-                ) { Text(if (state.isReversed) "Normal" else "Reverse") }
+                ) { Text(if (state.isReversed) "Normal" else "Normal ✓") }
+                SmallButton(
+                    onClick = { RideRepository.setReverseMode(true) },
+                    enabled = state.routeToFollow.isNotEmpty(),
+                ) { Text(if (state.isReversed) "Reverse ✓" else "Reverse") }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -511,6 +516,18 @@ fun App(
                         singleLine = true,
                         label = { Text("Jméno koně") },
                     )
+                    if (state.horses.isNotEmpty()) {
+                        Text("Existující koně:", fontSize = 12.sp, color = Color(0xFF5F6B76))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            state.horses.forEach { horse ->
+                                SmallButton(
+                                    onClick = { followHorseName = horse.name },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    height = 34.dp,
+                                ) { Text(horse.name) }
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -593,6 +610,7 @@ private fun HorseBar(selected: Horse, onChange: () -> Unit) {
 private fun HorseSelectScreen(
     horses: List<Horse>,
     horseStats: Map<String, RideStats>,
+    isLoadingData: Boolean,
     onSelect: (Horse) -> Unit,
     onAdd: (String) -> Unit,
     onDelete: (Horse) -> Unit,
@@ -614,9 +632,14 @@ private fun HorseSelectScreen(
             Text("Vyber koně", modifier = Modifier.weight(1f))
             if (onClose != null) SmallButton(onClick = onClose, height = 32.dp) { Text("Zpět") }
         }
-        if (horses.isEmpty()) {
+        if (isLoadingData && horses.isEmpty()) {
+            Text("Načítám uložené koně a jízdy…")
+        } else if (horses.isEmpty()) {
             Text("Zatím nemáš žádného koně. Přidej prvního:")
         } else {
+            if (isLoadingData) {
+                Text("Obnovuji data…", fontSize = 12.sp, color = Color(0xFF5F6B76))
+            }
             horses.forEach { h ->
                 val st = horseStats[h.id]
                 val ridesCount = st?.ridesCount ?: 0

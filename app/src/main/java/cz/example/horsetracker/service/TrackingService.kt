@@ -461,7 +461,7 @@ class TrackingService : Service() {
         if (state.waypoints.isEmpty()) return
 
         val now = System.currentTimeMillis()
-        val triggerDistanceM = 5.0
+        val triggerDistanceM = 10.0
         val repeatCooldownMs = 10 * 60 * 1000L
 
         state.waypoints.forEach { wp ->
@@ -497,8 +497,8 @@ class TrackingService : Service() {
             offRouteWarned = true
             val sideText =
                 when (Geo.sideOfPolyline(location.latitude, location.longitude, state.mapState.followRoute)) {
-                    Geo.SIDE_LEFT -> " vlevo od trasy"
-                    Geo.SIDE_RIGHT -> " vpravo od trasy"
+                    Geo.SIDE_LEFT -> " trasa je vpravo"
+                    Geo.SIDE_RIGHT -> " trasa je vlevo"
                     else -> ""
                 }
             tts?.speak(

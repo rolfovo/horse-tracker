@@ -264,17 +264,21 @@ private fun attachLayers(style: Style) {
     )
 
     val followColor =
-        Expression.match(
-            Expression.get("band"),
-            Expression.literal(0),
-            Expression.color(Color.argb(255, 35, 107, 173)),
-            Expression.literal(1),
-            Expression.color(Color.argb(255, 92, 184, 92)),
-            Expression.literal(2),
-            Expression.color(Color.argb(255, 240, 183, 63)),
-            Expression.literal(3),
+        Expression.switchCase(
+            Expression.eq(Expression.get("active"), Expression.literal(1)),
             Expression.color(Color.argb(255, 214, 74, 62)),
-            Expression.color(Color.argb(255, 214, 74, 62)),
+            Expression.match(
+                Expression.get("band"),
+                Expression.literal(0),
+                Expression.color(Color.argb(255, 35, 107, 173)),
+                Expression.literal(1),
+                Expression.color(Color.argb(255, 92, 184, 92)),
+                Expression.literal(2),
+                Expression.color(Color.argb(255, 240, 183, 63)),
+                Expression.literal(3),
+                Expression.color(Color.argb(255, 214, 74, 62)),
+                Expression.color(Color.argb(255, 214, 74, 62)),
+            ),
         )
 
     style.addLayer(
@@ -339,7 +343,7 @@ private fun render(style: Style, state: MapState) {
     val wpFeatures = state.waypoints.map { w -> Feature.fromGeometry(Point.fromLngLat(w.lon, w.lat)) }
     style.getSourceAs<GeoJsonSource>(SOURCE_WAYPOINTS)?.setGeoJson(FeatureCollection.fromFeatures(wpFeatures))
 
-    val followFeatures = buildFollowFeatures(state.followSegments)
+    val followFeatures = buildFollowFeatures(state.followSegments, state.followActive)
     style.getSourceAs<GeoJsonSource>(SOURCE_FOLLOW)?.setGeoJson(FeatureCollection.fromFeatures(followFeatures))
 
     val userFeature =
@@ -387,7 +391,7 @@ private fun buildBounds(route: List<Pair<Double, Double>>): LatLngBounds? {
     return builder.build()
 }
 
-private fun buildFollowFeatures(segments: List<SpeedSegment>): List<Feature> {
+private fun buildFollowFeatures(segments: List<SpeedSegment>, active: Boolean): List<Feature> {
     if (segments.isEmpty()) return emptyList()
 
     val features = ArrayList<Feature>()
@@ -403,6 +407,7 @@ private fun buildFollowFeatures(segments: List<SpeedSegment>): List<Feature> {
         features +=
             Feature.fromGeometry(LineString.fromLngLats(currentPoints.toList())).apply {
                 addNumberProperty("band", currentBand.toDouble())
+                addNumberProperty("active", if (active) 1.0 else 0.0)
             }
     }
 
