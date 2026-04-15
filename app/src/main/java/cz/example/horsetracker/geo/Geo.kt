@@ -35,6 +35,15 @@ object Geo {
         return if (best.isFinite()) best else 0.0
     }
 
+    fun distancePointToSegmentMeters(
+        pLat: Double,
+        pLon: Double,
+        aLat: Double,
+        aLon: Double,
+        bLat: Double,
+        bLon: Double,
+    ): Double = distancePointToSegmentMetersInternal(pLat, pLon, aLat, aLon, bLat, bLon)
+
     fun nearestPointOnPolyline(
         userLat: Double,
         userLon: Double,
@@ -77,7 +86,7 @@ object Geo {
         return bestSide
     }
 
-    private fun distancePointToSegmentMeters(
+    private fun distancePointToSegmentMetersInternal(
         pLat: Double,
         pLon: Double,
         aLat: Double,

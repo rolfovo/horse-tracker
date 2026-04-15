@@ -94,7 +94,7 @@ class TrackingService : Service() {
 
             maybeAutoFinishLoop(smoothed)
             maybeAnnounceOffRoute(smoothed)
-            maybeAnnounceNearbyWaypoint(smoothed)
+            maybeAnnounceNearbyWaypoint(smoothed, prev)
             maybeAnnounceDestination(smoothed)
         }
 
@@ -454,7 +454,7 @@ class TrackingService : Service() {
         }
     }
 
-    private fun maybeAnnounceNearbyWaypoint(location: Location) {
+    private fun maybeAnnounceNearbyWaypoint(location: Location, previousLocation: Location?) {
         if (!(isRecording || isFollowing)) return
 
         val state = RideRepository.state.value
@@ -468,7 +468,19 @@ class TrackingService : Service() {
             val label = wp.label?.trim().orEmpty()
             if (label.isEmpty()) return@forEach
 
-            val distance = Geo.haversineMeters(location.latitude, location.longitude, wp.lat, wp.lon)
+            val pointDistance = Geo.haversineMeters(location.latitude, location.longitude, wp.lat, wp.lon)
+            val passDistance =
+                previousLocation?.let {
+                    Geo.distancePointToSegmentMeters(
+                        wp.lat,
+                        wp.lon,
+                        previousLocation.latitude,
+                        previousLocation.longitude,
+                        location.latitude,
+                        location.longitude,
+                    )
+                } ?: Double.POSITIVE_INFINITY
+            val distance = minOf(pointDistance, passDistance)
             if (distance > triggerDistanceM) return@forEach
 
             val key = "${wp.timeEpochMs}_${wp.lat}_${wp.lon}_${label}"

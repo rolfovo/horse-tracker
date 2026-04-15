@@ -134,9 +134,9 @@ object RideRepository {
                 offRouteMeters = if (isFollowing) prev.offRouteMeters else 0.0,
                 mapState =
                     if (isFollowing) {
-                        prev.mapState
+                        prev.mapState.copy(followActive = true)
                     } else {
-                        prev.mapState.copy(snapLat = null, snapLon = null)
+                        prev.mapState.copy(snapLat = null, snapLon = null, followActive = false)
                     },
             )
     }
