@@ -245,12 +245,12 @@ private fun attachLayers(style: Style) {
             Expression.linear(),
             Expression.get("speed_mps"),
             Expression.stop(0.0, Expression.color(Color.argb(255, 35, 107, 173))),   // very slow
-            Expression.stop(1.2, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~4.3 km/h
-            Expression.stop(1.9, Expression.color(Color.argb(255, 92, 184, 92))),    // walk upper ~6.8 km/h
-            Expression.stop(2.7, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~9.7 km/h
-            Expression.stop(3.8, Expression.color(Color.argb(255, 240, 183, 63))),   // trot upper ~13.7 km/h
-            Expression.stop(4.7, Expression.color(Color.argb(255, 235, 126, 63))),   // canter start ~16.9 km/h
-            Expression.stop(5.6, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~20 km/h
+            Expression.stop(0.7, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~2.5 km/h
+            Expression.stop(1.25, Expression.color(Color.argb(255, 92, 184, 92))),   // walk upper ~4.5 km/h
+            Expression.stop(1.9, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~6.8 km/h
+            Expression.stop(2.3, Expression.color(Color.argb(255, 240, 183, 63))),   // trot upper ~8.3 km/h
+            Expression.stop(3.0, Expression.color(Color.argb(255, 235, 126, 63))),   // canter start ~10.8 km/h
+            Expression.stop(5.0, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~18.0 km/h
         )
 
     style.addLayer(
