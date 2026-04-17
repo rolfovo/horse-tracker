@@ -13,7 +13,9 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
@@ -41,13 +43,16 @@ class TrackingService : Service() {
     private var isRecording = false
     private var isFollowing = false
     private var offRouteWarned = false
+    private var wrongDirectionWarned = false
     private var destinationAnnounced = false
     private var lastRouteEndKey: String? = null
+    private var lastFollowProgressM: Double? = null
     private var locationUpdatesActive = false
     private var recordingWarmupUntilElapsedMs = 0L
     private var waitingForFirstRecordedPointAfterWarmup = false
     private var autoFinishTriggered = false
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val listener =
         LocationListener { location ->
@@ -94,6 +99,7 @@ class TrackingService : Service() {
 
             maybeAutoFinishLoop(smoothed)
             maybeAnnounceOffRoute(smoothed)
+            maybeAnnounceWrongDirection(smoothed, prev)
             maybeAnnounceNearbyWaypoint(smoothed, prev)
             maybeAnnounceDestination(smoothed)
         }
@@ -173,8 +179,10 @@ class TrackingService : Service() {
         }
         isFollowing = true
         offRouteWarned = false
+        wrongDirectionWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
+        lastFollowProgressM = null
         RideRepository.setFollowing(true)
         try {
             startForeground(NOTIF_ID, buildNotification(statusText()))
@@ -191,8 +199,10 @@ class TrackingService : Service() {
     private fun stopFollow() {
         isFollowing = false
         offRouteWarned = false
+        wrongDirectionWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
+        lastFollowProgressM = null
         RideRepository.setFollowing(false)
         if (!isRecording) {
             stopLocation()
@@ -299,8 +309,10 @@ class TrackingService : Service() {
         waitingForFirstRecordedPointAfterWarmup = false
         autoFinishTriggered = false
         offRouteWarned = false
+        wrongDirectionWarned = false
         destinationAnnounced = false
         lastRouteEndKey = null
+        lastFollowProgressM = null
         RideRepository.setRecording(false)
         RideRepository.setFollowing(false)
         stopLocation()
@@ -534,6 +546,44 @@ class TrackingService : Service() {
         }
     }
 
+    private fun maybeAnnounceWrongDirection(location: Location, previousLocation: Location?) {
+        if (!isFollowing) return
+        val previous = previousLocation ?: return
+        val state = RideRepository.state.value
+        val route = state.mapState.followRoute
+        if (route.size < 2) return
+
+        val movedDistanceM = Geo.haversineMeters(previous.latitude, previous.longitude, location.latitude, location.longitude)
+        if (movedDistanceM < WRONG_DIRECTION_MIN_MOVE_M) return
+        if (state.offRouteMeters > WRONG_DIRECTION_MAX_ROUTE_DISTANCE_M) {
+            lastFollowProgressM = null
+            wrongDirectionWarned = false
+            return
+        }
+
+        val progress = Geo.progressAlongPolylineMeters(location.latitude, location.longitude, route) ?: return
+        val previousProgress = lastFollowProgressM
+        lastFollowProgressM = progress
+
+        if (previousProgress == null) return
+
+        val progressDeltaM = progress - previousProgress
+        if (!wrongDirectionWarned && progressDeltaM <= -WRONG_DIRECTION_BACKTRACK_M) {
+            wrongDirectionWarned = true
+            tts?.speak(
+                "Pozor, jdete v protisměru po trase.",
+                TextToSpeech.QUEUE_ADD,
+                null,
+                "wrong_direction",
+            )
+            return
+        }
+
+        if (wrongDirectionWarned && progressDeltaM >= WRONG_DIRECTION_RECOVER_M) {
+            wrongDirectionWarned = false
+        }
+    }
+
     private fun maybeAnnounceDestination(location: Location) {
         if (!isFollowing) return
         val route = RideRepository.state.value.mapState.followRoute
@@ -567,8 +617,19 @@ class TrackingService : Service() {
         if (distanceToStartM > AUTO_FINISH_RADIUS_M) return
 
         autoFinishTriggered = true
+        tts?.speak(
+            "Dojeli jste do cíle.",
+            TextToSpeech.QUEUE_ADD,
+            null,
+            "auto_finish_destination",
+        )
         RideRepository.saveCurrentRide(applicationContext)
-        stopRecording()
+        mainHandler.postDelayed(
+            {
+                stopRecording()
+            },
+            AUTO_FINISH_STOP_DELAY_MS,
+        )
     }
 
     private fun reverseDirectionWords(input: String): String {
@@ -606,5 +667,10 @@ class TrackingService : Service() {
         private const val RECORDING_WARMUP_MS = 5_000L
         private const val AUTO_FINISH_RADIUS_M = 20.0
         private const val AUTO_FINISH_MIN_DURATION_MS = 10 * 60 * 1000L
+        private const val AUTO_FINISH_STOP_DELAY_MS = 2_500L
+        private const val WRONG_DIRECTION_MIN_MOVE_M = 5.0
+        private const val WRONG_DIRECTION_BACKTRACK_M = 8.0
+        private const val WRONG_DIRECTION_RECOVER_M = 4.0
+        private const val WRONG_DIRECTION_MAX_ROUTE_DISTANCE_M = 12.0
     }
 }
