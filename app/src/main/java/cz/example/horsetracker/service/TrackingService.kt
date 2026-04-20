@@ -588,6 +588,8 @@ class TrackingService : Service() {
         if (!isFollowing) return
         val route = RideRepository.state.value.mapState.followRoute
         val end = route.lastOrNull() ?: return
+        val routeLength = Geo.polylineLengthMeters(route)
+        val progress = Geo.progressAlongPolylineMeters(location.latitude, location.longitude, route) ?: return
         val endKey = "${end.first}_${end.second}"
         if (lastRouteEndKey != endKey) {
             lastRouteEndKey = endKey
@@ -595,6 +597,11 @@ class TrackingService : Service() {
         }
         if (destinationAnnounced) return
         val distanceToEnd = Geo.haversineMeters(location.latitude, location.longitude, end.first, end.second)
+        if (routeLength > MIN_DESTINATION_PROGRESS_ROUTE_LENGTH_M &&
+            progress < routeLength * MIN_DESTINATION_PROGRESS_RATIO
+        ) {
+            return
+        }
         if (distanceToEnd > 20.0) return
         destinationAnnounced = true
         tts?.speak(
@@ -672,5 +679,7 @@ class TrackingService : Service() {
         private const val WRONG_DIRECTION_BACKTRACK_M = 8.0
         private const val WRONG_DIRECTION_RECOVER_M = 4.0
         private const val WRONG_DIRECTION_MAX_ROUTE_DISTANCE_M = 12.0
+        private const val MIN_DESTINATION_PROGRESS_RATIO = 0.85
+        private const val MIN_DESTINATION_PROGRESS_ROUTE_LENGTH_M = 60.0
     }
 }

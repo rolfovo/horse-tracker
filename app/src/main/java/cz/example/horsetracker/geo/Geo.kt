@@ -90,6 +90,17 @@ object Geo {
         return bestProgress
     }
 
+    fun polylineLengthMeters(route: List<Pair<Double, Double>>): Double {
+        if (route.size < 2) return 0.0
+        var total = 0.0
+        for (i in 1 until route.size) {
+            val a = route[i - 1]
+            val b = route[i]
+            total += haversineMeters(a.first, a.second, b.first, b.second)
+        }
+        return total
+    }
+
     fun sideOfPolyline(userLat: Double, userLon: Double, route: List<Pair<Double, Double>>): Int {
         if (route.size < 2) return SIDE_UNKNOWN
         var bestDist = Double.POSITIVE_INFINITY
