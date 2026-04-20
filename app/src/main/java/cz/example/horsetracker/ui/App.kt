@@ -397,6 +397,7 @@ fun App(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Čas: ${formatDuration(state.currentDurationMs)}", fontSize = 13.sp)
                 Text("Vzdál.: ${"%.2f".format(state.currentDistanceM / 1000.0)} km", fontSize = 13.sp)
                 Text("Rychl.: ${"%.1f".format(state.lastSpeedMps * 3.6)} km/h", fontSize = 13.sp)
             }
