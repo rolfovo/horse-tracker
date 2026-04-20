@@ -426,8 +426,6 @@ fun App(
                 distanceKm = state.currentDistanceM / 1000.0,
                 speedKmh = state.lastSpeedMps * 3.6,
                 avgSpeedKmh = state.currentAvgSpeedMps * 3.6,
-                gpsAccuracyM = state.lastAccuracyM,
-                offRouteM = state.offRouteMeters,
                 autoCenter = state.isAutoCenter,
                 offRouteWarnThresholdM = state.offRouteWarnThresholdM.toInt(),
                 backOnRouteThresholdM = state.backOnRouteThresholdM.toInt(),
@@ -821,8 +819,6 @@ private fun CompactRidePanel(
     distanceKm: Double,
     speedKmh: Double,
     avgSpeedKmh: Double,
-    gpsAccuracyM: Double,
-    offRouteM: Double,
     autoCenter: Boolean,
     offRouteWarnThresholdM: Int,
     backOnRouteThresholdM: Int,
@@ -872,8 +868,6 @@ private fun CompactRidePanel(
             StatChip(title = "Vzdál.", value = "${"%.2f".format(distanceKm)} km", background = Color(0xFFEDF6FF))
             StatChip(title = "Rychl.", value = "${"%.1f".format(speedKmh)} km/h", background = Color(0xFFE7F7EF))
             StatChip(title = "Prům.", value = "${"%.1f".format(avgSpeedKmh)} km/h", background = Color(0xFFFFF2DE))
-            StatChip(title = "GPS", value = "${"%.0f".format(gpsAccuracyM)} m", background = Color(0xFFF0F2F5))
-            StatChip(title = "Odchylka", value = "${"%.0f".format(offRouteM)} m", background = Color(0xFFFFECE8))
         }
 
         FlowRow(
