@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -54,6 +58,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun App(
     onRequestLocationPermission: () -> Unit,
@@ -270,7 +275,7 @@ fun App(
             },
         )
 
-        Column(modifier = Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (!hasLocation) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SmallButton(onClick = onRequestLocationPermission) { Text("Povolit polohu") }
@@ -307,11 +312,16 @@ fun App(
                     "Jízdy: ${stats.ridesCount} | Čas: ${formatDuration(stats.totalDurationMs)} | " +
                         "Vzdál.: ${"%.1f".format(stats.totalDistanceM / 1000.0)} km | " +
                         "Avg: ${"%.1f".format(stats.avgSpeedMps * 3.6)} km/h | Max: ${"%.1f".format(stats.maxSpeedMps * 3.6)} km/h",
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
+                    color = Color(0xFF4F5C67),
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 SmallButton(
                     onClick = {
                         val intent = Intent(context, TrackingService::class.java).apply {
@@ -320,6 +330,7 @@ fun App(
                         context.startForegroundService(intent)
                     },
                     enabled = canStartRecording,
+                    tone = ButtonTone.Primary,
                 ) { Text("Start") }
 
                 SmallButton(
@@ -334,6 +345,7 @@ fun App(
                         }
                     },
                     enabled = state.isRecording,
+                    tone = ButtonTone.Danger,
                 ) { Text("Stop") }
 
                 SmallButton(
@@ -342,6 +354,7 @@ fun App(
                         showWaypointDialog = true
                     },
                     enabled = state.isRecording,
+                    tone = ButtonTone.Neutral,
                 ) { Text("Bod") }
 
                 SmallButton(
@@ -359,16 +372,22 @@ fun App(
                         }
                     },
                     enabled = state.isRecording,
+                    tone = ButtonTone.Neutral,
                 ) { Text("Hlas") }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 SmallButton(
                     onClick = {
                         ridesFilterHorseId = selectedHorse.id
                         RideRepository.refreshRides(context, horseId = ridesFilterHorseId)
                         showRides = true
                     },
+                    tone = ButtonTone.Neutral,
                 ) { Text("Jízdy") }
 
                 SmallButton(
@@ -384,63 +403,49 @@ fun App(
                         }
                     },
                     enabled = hasTrackingPermission && state.routeToFollow.isNotEmpty(),
+                    tone = if (state.isFollowing) ButtonTone.Danger else ButtonTone.Accent,
                 ) { Text(if (state.isFollowing) "Stop follow" else "Follow") }
 
                 SmallButton(
                     onClick = { RideRepository.setReverseMode(false) },
                     enabled = state.routeToFollow.isNotEmpty(),
+                    tone = if (!state.isReversed) ButtonTone.Selected else ButtonTone.Neutral,
                 ) { Text(if (state.isReversed) "Normal" else "Normal ✓") }
                 SmallButton(
                     onClick = { RideRepository.setReverseMode(true) },
                     enabled = state.routeToFollow.isNotEmpty(),
+                    tone = if (state.isReversed) ButtonTone.Selected else ButtonTone.Neutral,
                 ) { Text(if (state.isReversed) "Reverse ✓" else "Reverse") }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Čas: ${formatDuration(state.currentDurationMs)}", fontSize = 13.sp)
-                Text("Vzdál.: ${"%.2f".format(state.currentDistanceM / 1000.0)} km", fontSize = 13.sp)
-                Text("Rychl.: ${"%.1f".format(state.lastSpeedMps * 3.6)} km/h", fontSize = 13.sp)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Prům.: ${"%.1f".format(state.currentAvgSpeedMps * 3.6)} km/h", fontSize = 13.sp)
-                Text("Odchylka: ${"%.0f".format(state.offRouteMeters)} m", fontSize = 13.sp)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("GPS acc: ${"%.0f".format(state.lastAccuracyM)} m", fontSize = 13.sp)
-                SmallButton(onClick = { RideRepository.toggleAutoCenter() }, height = 30.dp) {
-                    Text(if (state.isAutoCenter) "Auto-centr: ON" else "Auto-centr: OFF")
-                }
-                SmallButton(
-                    onClick = { showOfflineDialog = true },
-                    enabled = hasLocation,
-                    height = 30.dp,
-                ) { Text("Offline okolí") }
-                SmallButton(
-                    onClick = {
-                        val stopIntent = Intent(context, TrackingService::class.java).apply {
-                            action = TrackingService.ACTION_STOP_ALL
-                        }
-                        context.startService(stopIntent)
-                        (context as? Activity)?.finishAffinity()
-                    },
-                    height = 30.dp,
-                ) { Text("KONEC") }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Mimo: ${state.offRouteWarnThresholdM.toInt()}m", fontSize = 12.sp)
-                SmallButton(onClick = { RideRepository.updateOffRouteWarnThreshold(-5.0) }, height = 28.dp) { Text("-") }
-                SmallButton(onClick = { RideRepository.updateOffRouteWarnThreshold(5.0) }, height = 28.dp) { Text("+") }
-                Text("Zpět: ${state.backOnRouteThresholdM.toInt()}m", fontSize = 12.sp)
-                SmallButton(onClick = { RideRepository.updateBackOnRouteThreshold(-1.0) }, height = 28.dp) { Text("-") }
-                SmallButton(onClick = { RideRepository.updateBackOnRouteThreshold(1.0) }, height = 28.dp) { Text("+") }
-            }
-            Text(
-                text = "Verze $appVersion",
-                modifier = Modifier.fillMaxWidth(),
-                fontSize = 11.sp,
-                color = Color(0xFF5F6B76),
-                textAlign = TextAlign.End,
+            CompactRidePanel(
+                isRecording = state.isRecording,
+                isFollowing = state.isFollowing,
+                isReversed = state.isReversed,
+                durationText = formatDuration(state.currentDurationMs),
+                distanceKm = state.currentDistanceM / 1000.0,
+                speedKmh = state.lastSpeedMps * 3.6,
+                avgSpeedKmh = state.currentAvgSpeedMps * 3.6,
+                gpsAccuracyM = state.lastAccuracyM,
+                offRouteM = state.offRouteMeters,
+                autoCenter = state.isAutoCenter,
+                offRouteWarnThresholdM = state.offRouteWarnThresholdM.toInt(),
+                backOnRouteThresholdM = state.backOnRouteThresholdM.toInt(),
+                appVersion = appVersion,
+                hasLocation = hasLocation,
+                onToggleAutoCenter = { RideRepository.toggleAutoCenter() },
+                onShowOfflineDialog = { showOfflineDialog = true },
+                onStopAll = {
+                    val stopIntent = Intent(context, TrackingService::class.java).apply {
+                        action = TrackingService.ACTION_STOP_ALL
+                    }
+                    context.startService(stopIntent)
+                    (context as? Activity)?.finishAffinity()
+                },
+                onDecreaseOffRoute = { RideRepository.updateOffRouteWarnThreshold(-5.0) },
+                onIncreaseOffRoute = { RideRepository.updateOffRouteWarnThreshold(5.0) },
+                onDecreaseBackOnRoute = { RideRepository.updateBackOnRouteThreshold(-1.0) },
+                onIncreaseBackOnRoute = { RideRepository.updateBackOnRouteThreshold(1.0) },
             )
         }
     }
@@ -748,14 +753,216 @@ private fun SmallButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     height: Dp = 32.dp,
+    tone: ButtonTone = ButtonTone.Accent,
     content: @Composable () -> Unit,
 ) {
+    val colors =
+        when (tone) {
+            ButtonTone.Primary ->
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF2C7A69),
+                    contentColor = Color.White,
+                    disabledContainerColor = Color(0xFFBDD4CE),
+                    disabledContentColor = Color.White,
+                )
+            ButtonTone.Accent ->
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF6755C7),
+                    contentColor = Color.White,
+                    disabledContainerColor = Color(0xFFD6D0F0),
+                    disabledContentColor = Color.White,
+                )
+            ButtonTone.Danger ->
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFC75B55),
+                    contentColor = Color.White,
+                    disabledContainerColor = Color(0xFFE9C7C4),
+                    disabledContentColor = Color.White,
+                )
+            ButtonTone.Neutral ->
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFE8EDF4),
+                    contentColor = Color(0xFF2A3945),
+                    disabledContainerColor = Color(0xFFF0F2F5),
+                    disabledContentColor = Color(0xFF93A0AC),
+                )
+            ButtonTone.Selected ->
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF325D9C),
+                    contentColor = Color.White,
+                    disabledContainerColor = Color(0xFFC4D3E8),
+                    disabledContentColor = Color.White,
+                )
+        }
     Button(
         onClick = onClick,
         modifier = modifier.height(height),
         enabled = enabled,
+        colors = colors,
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
     ) { content() }
+}
+
+private enum class ButtonTone {
+    Primary,
+    Accent,
+    Danger,
+    Neutral,
+    Selected,
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CompactRidePanel(
+    isRecording: Boolean,
+    isFollowing: Boolean,
+    isReversed: Boolean,
+    durationText: String,
+    distanceKm: Double,
+    speedKmh: Double,
+    avgSpeedKmh: Double,
+    gpsAccuracyM: Double,
+    offRouteM: Double,
+    autoCenter: Boolean,
+    offRouteWarnThresholdM: Int,
+    backOnRouteThresholdM: Int,
+    appVersion: String,
+    hasLocation: Boolean,
+    onToggleAutoCenter: () -> Unit,
+    onShowOfflineDialog: () -> Unit,
+    onStopAll: () -> Unit,
+    onDecreaseOffRoute: () -> Unit,
+    onIncreaseOffRoute: () -> Unit,
+    onDecreaseBackOnRoute: () -> Unit,
+    onIncreaseBackOnRoute: () -> Unit,
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .background(Color(0xFFF6F7FB), RoundedCornerShape(16.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (isRecording) {
+                StatusChip(label = "Záznam běží", background = Color(0xFFE1F3E8), foreground = Color(0xFF1E6A47))
+            }
+            if (isFollowing) {
+                StatusChip(label = "Follow aktivní", background = Color(0xFFFFE6E2), foreground = Color(0xFFB25145))
+            }
+            if (isFollowing && isReversed) {
+                StatusChip(label = "Reverse", background = Color(0xFFE6EBFF), foreground = Color(0xFF4158B4))
+            }
+            if (!isRecording && !isFollowing) {
+                StatusChip(label = "Připraveno", background = Color(0xFFEAF0F6), foreground = Color(0xFF516271))
+            }
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            StatChip(title = "Čas", value = durationText, background = Color.White)
+            StatChip(title = "Vzdál.", value = "${"%.2f".format(distanceKm)} km", background = Color(0xFFEDF6FF))
+            StatChip(title = "Rychl.", value = "${"%.1f".format(speedKmh)} km/h", background = Color(0xFFE7F7EF))
+            StatChip(title = "Prům.", value = "${"%.1f".format(avgSpeedKmh)} km/h", background = Color(0xFFFFF2DE))
+            StatChip(title = "GPS", value = "${"%.0f".format(gpsAccuracyM)} m", background = Color(0xFFF0F2F5))
+            StatChip(title = "Odchylka", value = "${"%.0f".format(offRouteM)} m", background = Color(0xFFFFECE8))
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SmallButton(
+                onClick = onToggleAutoCenter,
+                height = 28.dp,
+                tone = if (autoCenter) ButtonTone.Selected else ButtonTone.Neutral,
+            ) {
+                Text(if (autoCenter) "Auto-centr ON" else "Auto-centr OFF")
+            }
+            SmallButton(
+                onClick = onShowOfflineDialog,
+                enabled = hasLocation,
+                height = 28.dp,
+                tone = ButtonTone.Neutral,
+            ) { Text("Offline okolí") }
+            SmallButton(onClick = onStopAll, height = 28.dp, tone = ButtonTone.Danger) { Text("Konec") }
+            ThresholdAdjuster(
+                label = "Mimo",
+                value = "${offRouteWarnThresholdM} m",
+                onDecrease = onDecreaseOffRoute,
+                onIncrease = onIncreaseOffRoute,
+            )
+            ThresholdAdjuster(
+                label = "Zpět",
+                value = "${backOnRouteThresholdM} m",
+                onDecrease = onDecreaseBackOnRoute,
+                onIncrease = onIncreaseBackOnRoute,
+            )
+        }
+
+        Text(
+            text = "Verze $appVersion",
+            modifier = Modifier.fillMaxWidth(),
+            fontSize = 10.sp,
+            color = Color(0xFF6B7782),
+            textAlign = TextAlign.End,
+        )
+    }
+}
+
+@Composable
+private fun StatChip(title: String, value: String, background: Color) {
+    Column(
+        modifier =
+            Modifier
+                .background(background, RoundedCornerShape(12.dp))
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        Text(title, fontSize = 10.sp, color = Color(0xFF65727D))
+        Text(value, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1D2A34))
+    }
+}
+
+@Composable
+private fun StatusChip(label: String, background: Color, foreground: Color) {
+    Box(
+        modifier =
+            Modifier
+                .background(background, RoundedCornerShape(999.dp))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = foreground)
+    }
+}
+
+@Composable
+private fun ThresholdAdjuster(
+    label: String,
+    value: String,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.background(Color.White, RoundedCornerShape(12.dp)).padding(start = 8.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Column {
+            Text(label, fontSize = 10.sp, color = Color(0xFF65727D))
+            Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1D2A34))
+        }
+        SmallButton(onClick = onDecrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("-") }
+        SmallButton(onClick = onIncrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("+") }
+    }
 }
 
 @Composable
