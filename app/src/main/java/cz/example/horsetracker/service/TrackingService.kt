@@ -625,7 +625,7 @@ class TrackingService : Service() {
 
         autoFinishTriggered = true
         tts?.speak(
-            "Dojeli jste do cíle.",
+            "Jste zpět na startu, ukládám trasu.",
             TextToSpeech.QUEUE_ADD,
             null,
             "auto_finish_destination",

@@ -248,8 +248,8 @@ private fun attachLayers(style: Style) {
             Expression.stop(0.7, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~2.5 km/h
             Expression.stop(1.25, Expression.color(Color.argb(255, 92, 184, 92))),   // walk upper ~4.5 km/h
             Expression.stop(1.9, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~6.8 km/h
-            Expression.stop(2.3, Expression.color(Color.argb(255, 240, 183, 63))),   // trot upper ~8.3 km/h
-            Expression.stop(3.0, Expression.color(Color.argb(255, 235, 126, 63))),   // canter start ~10.8 km/h
+            Expression.stop(2.58, Expression.color(Color.argb(255, 240, 183, 63))),  // trot upper ~9.3 km/h
+            Expression.stop(3.28, Expression.color(Color.argb(255, 235, 126, 63))),  // canter start ~11.8 km/h
             Expression.stop(5.0, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~18.0 km/h
         )
 
