@@ -39,11 +39,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
@@ -71,12 +71,6 @@ fun App(
 
     val selectedHorse =
         state.selectedHorseId?.let { id -> state.horses.firstOrNull { it.id == id } }
-    val appVersion =
-        remember(context) {
-            runCatching {
-                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
-            }.getOrDefault("?")
-        }
 
     val hasTrackingPermission = hasLocation && hasBackgroundLocation
     val canStartRecording = hasLocation && !state.isRecording && !state.isFollowing
@@ -429,7 +423,6 @@ fun App(
                 autoCenter = state.isAutoCenter,
                 offRouteWarnThresholdM = state.offRouteWarnThresholdM.toInt(),
                 backOnRouteThresholdM = state.backOnRouteThresholdM.toInt(),
-                appVersion = appVersion,
                 hasLocation = hasLocation,
                 onToggleAutoCenter = { RideRepository.toggleAutoCenter() },
                 onShowOfflineDialog = { showOfflineDialog = true },
@@ -822,7 +815,6 @@ private fun CompactRidePanel(
     autoCenter: Boolean,
     offRouteWarnThresholdM: Int,
     backOnRouteThresholdM: Int,
-    appVersion: String,
     hasLocation: Boolean,
     onToggleAutoCenter: () -> Unit,
     onShowOfflineDialog: () -> Unit,
@@ -902,14 +894,6 @@ private fun CompactRidePanel(
                 onIncrease = onIncreaseBackOnRoute,
             )
         }
-
-        Text(
-            text = "Verze $appVersion",
-            modifier = Modifier.fillMaxWidth(),
-            fontSize = 10.sp,
-            color = Color(0xFF6B7782),
-            textAlign = TextAlign.End,
-        )
     }
 }
 
@@ -947,14 +931,16 @@ private fun ThresholdAdjuster(
     onIncrease: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.background(Color.White, RoundedCornerShape(12.dp)).padding(start = 8.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+        modifier =
+            Modifier
+                .background(Color.White, RoundedCornerShape(12.dp))
+                .padding(start = 8.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text(label, fontSize = 10.sp, color = Color(0xFF65727D))
-            Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1D2A34))
-        }
+        Text(label, fontSize = 10.sp, color = Color(0xFF65727D))
         SmallButton(onClick = onDecrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("-") }
+        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1D2A34))
         SmallButton(onClick = onIncrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("+") }
     }
 }
