@@ -62,7 +62,7 @@ import java.util.Locale
 @Composable
 fun App(
     onRequestLocationPermission: () -> Unit,
-    onRequestBackgroundLocationPermission: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onRequestBackgroundLocationPermission: () -> Unit,
 ) {
     val context = LocalContext.current
     val state by RideRepository.state.collectAsState()
@@ -297,20 +297,6 @@ fun App(
                     ) { Text("Otevřít nastavení") }
                 }
                 Text("Bez povolené polohy Android nedovolí spustit location foreground service (targetSdk 34).")
-            } else if (!hasBackgroundLocation) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SmallButton(onClick = onRequestBackgroundLocationPermission) {
-                        Text("Poloha na pozadí")
-                    }
-                    SmallButton(
-                        onClick = {
-                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = android.net.Uri.parse("package:${context.packageName}")
-                            }
-                            context.startActivity(intent)
-                        },
-                    ) { Text("Otevřít nastavení") }
-                }
             }
 
             val stats = state.horseStats[selectedHorse.id]
@@ -381,6 +367,14 @@ fun App(
                     enabled = state.isRecording,
                     tone = ButtonTone.Neutral,
                 ) { Text("Hlas") }
+
+                if (!state.isRecording && !state.isFollowing) {
+                    StatusChip(
+                        label = "Připraveno",
+                        background = Color(0xFFEAF0F6),
+                        foreground = Color(0xFF516271),
+                    )
+                }
             }
 
             FlowRow(
@@ -851,9 +845,6 @@ private fun CompactRidePanel(
             }
             if (isFollowing && isReversed) {
                 StatusChip(label = "Reverse", background = Color(0xFFE6EBFF), foreground = Color(0xFF4158B4))
-            }
-            if (!isRecording && !isFollowing) {
-                StatusChip(label = "Připraveno", background = Color(0xFFEAF0F6), foreground = Color(0xFF516271))
             }
         }
 
