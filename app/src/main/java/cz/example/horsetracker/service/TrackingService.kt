@@ -19,6 +19,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import cz.example.horsetracker.MainActivity
@@ -51,6 +52,7 @@ class TrackingService : Service() {
     private var recordingWarmupUntilElapsedMs = 0L
     private var waitingForFirstRecordedPointAfterWarmup = false
     private var autoFinishTriggered = false
+    private var pendingStopAfterUtteranceId: String? = null
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -379,6 +381,7 @@ class TrackingService : Service() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         stopLocation()
         releaseWakeLock()
         tts?.stop()
@@ -445,6 +448,26 @@ class TrackingService : Service() {
                 if (status == TextToSpeech.SUCCESS) {
                     ttsReady = true
                     tts?.language = Locale("cs", "CZ")
+                    tts?.setOnUtteranceProgressListener(
+                        object : UtteranceProgressListener() {
+                            override fun onStart(utteranceId: String?) = Unit
+
+                            override fun onDone(utteranceId: String?) {
+                                if (utteranceId != null && utteranceId == pendingStopAfterUtteranceId) {
+                                    pendingStopAfterUtteranceId = null
+                                    mainHandler.post { stopRecording() }
+                                }
+                            }
+
+                            @Deprecated("Deprecated in Java")
+                            override fun onError(utteranceId: String?) {
+                                if (utteranceId != null && utteranceId == pendingStopAfterUtteranceId) {
+                                    pendingStopAfterUtteranceId = null
+                                    mainHandler.post { stopRecording() }
+                                }
+                            }
+                        },
+                    )
                     pendingSpeech?.let { (text, utteranceId) ->
                         tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
                         pendingSpeech = null
@@ -624,18 +647,32 @@ class TrackingService : Service() {
         if (distanceToStartM > AUTO_FINISH_RADIUS_M) return
 
         autoFinishTriggered = true
-        tts?.speak(
-            "Jste zpět na startu, ukládám trasu.",
-            TextToSpeech.QUEUE_ADD,
-            null,
-            "auto_finish_destination",
-        )
+        val rideName = RideRepository.previewCurrentRideName()
+        val message =
+            if (rideName.isNullOrBlank()) {
+                "Jste v cíli, ukládám trasu."
+            } else {
+                "Jste v cíli, ukládám trasu $rideName."
+            }
+        speakAndStopAfterCompletion(message, "auto_finish_destination")
         RideRepository.saveCurrentRide(applicationContext)
+    }
+
+    private fun speakAndStopAfterCompletion(text: String, utteranceId: String) {
+        pendingStopAfterUtteranceId = utteranceId
+        if (ttsReady) {
+            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+        } else {
+            pendingSpeech = text to utteranceId
+        }
         mainHandler.postDelayed(
             {
-                stopRecording()
+                if (pendingStopAfterUtteranceId == utteranceId) {
+                    pendingStopAfterUtteranceId = null
+                    stopRecording()
+                }
             },
-            AUTO_FINISH_STOP_DELAY_MS,
+            AUTO_FINISH_TTS_FALLBACK_MS,
         )
     }
 
@@ -674,7 +711,7 @@ class TrackingService : Service() {
         private const val RECORDING_WARMUP_MS = 5_000L
         private const val AUTO_FINISH_RADIUS_M = 20.0
         private const val AUTO_FINISH_MIN_DURATION_MS = 10 * 60 * 1000L
-        private const val AUTO_FINISH_STOP_DELAY_MS = 2_500L
+        private const val AUTO_FINISH_TTS_FALLBACK_MS = 8_000L
         private const val WRONG_DIRECTION_MIN_MOVE_M = 5.0
         private const val WRONG_DIRECTION_BACKTRACK_M = 8.0
         private const val WRONG_DIRECTION_RECOVER_M = 4.0

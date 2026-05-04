@@ -341,6 +341,14 @@ object RideRepository {
         }
     }
 
+    fun previewCurrentRideName(): String? {
+        val snapshot = _state.value
+        val horseId = snapshot.selectedHorseId ?: return null
+        if (snapshot.points.isEmpty()) return null
+        val horseName = snapshot.horses.firstOrNull { it.id == horseId }?.name ?: return null
+        return buildRideBaseName(snapshot.points, horseName, System.currentTimeMillis())
+    }
+
     fun saveCurrentRideForHorseName(context: Context, horseName: String) {
         val trimmed = horseName.trim()
         if (trimmed.isEmpty()) {

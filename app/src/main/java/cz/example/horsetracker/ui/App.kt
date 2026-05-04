@@ -88,6 +88,7 @@ fun App(
     var pendingRideExport by remember { mutableStateOf<RideSummary?>(null) }
     var pendingHorseImport by remember { mutableStateOf<Horse?>(null) }
     var showImportBackupConfirm by remember { mutableStateOf(false) }
+    var exitAfterRideSave by remember { mutableStateOf(false) }
 
     val voiceNoteLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -139,8 +140,21 @@ fun App(
                 is RideRepository.UiEvent.RideSaved -> {
                     val name = java.io.File(e.filePath).name
                     Toast.makeText(context, "Trasa $name uložena do ${e.filePath}", Toast.LENGTH_LONG).show()
+                    if (exitAfterRideSave) {
+                        exitAfterRideSave = false
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_ALL
+                        }
+                        context.startService(stopIntent)
+                        (context as? Activity)?.finishAffinity()
+                    }
                 }
-                is RideRepository.UiEvent.Message -> Toast.makeText(context, e.text, Toast.LENGTH_LONG).show()
+                is RideRepository.UiEvent.Message -> {
+                    if (exitAfterRideSave && e.text.startsWith("Uložení selhalo")) {
+                        exitAfterRideSave = false
+                    }
+                    Toast.makeText(context, e.text, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -297,7 +311,6 @@ fun App(
                         },
                     ) { Text("Otevřít nastavení") }
                 }
-                Text("Pro záznam při zhasnutém displeji nebo po odchodu z aplikace je potřeba povolit i polohu na pozadí.")
             }
 
             val stats = state.horseStats[selectedHorse.id]
@@ -421,22 +434,21 @@ fun App(
                 speedKmh = state.lastSpeedMps * 3.6,
                 avgSpeedKmh = state.currentAvgSpeedMps * 3.6,
                 autoCenter = state.isAutoCenter,
-                offRouteWarnThresholdM = state.offRouteWarnThresholdM.toInt(),
-                backOnRouteThresholdM = state.backOnRouteThresholdM.toInt(),
                 hasLocation = hasLocation,
                 onToggleAutoCenter = { RideRepository.toggleAutoCenter() },
                 onShowOfflineDialog = { showOfflineDialog = true },
                 onStopAll = {
-                    val stopIntent = Intent(context, TrackingService::class.java).apply {
-                        action = TrackingService.ACTION_STOP_ALL
+                    if (state.points.isNotEmpty()) {
+                        exitAfterRideSave = true
+                        RideRepository.saveCurrentRide(context)
+                    } else {
+                        val stopIntent = Intent(context, TrackingService::class.java).apply {
+                            action = TrackingService.ACTION_STOP_ALL
+                        }
+                        context.startService(stopIntent)
+                        (context as? Activity)?.finishAffinity()
                     }
-                    context.startService(stopIntent)
-                    (context as? Activity)?.finishAffinity()
                 },
-                onDecreaseOffRoute = { RideRepository.updateOffRouteWarnThreshold(-5.0) },
-                onIncreaseOffRoute = { RideRepository.updateOffRouteWarnThreshold(5.0) },
-                onDecreaseBackOnRoute = { RideRepository.updateBackOnRouteThreshold(-1.0) },
-                onIncreaseBackOnRoute = { RideRepository.updateBackOnRouteThreshold(1.0) },
             )
         }
     }
@@ -813,16 +825,10 @@ private fun CompactRidePanel(
     speedKmh: Double,
     avgSpeedKmh: Double,
     autoCenter: Boolean,
-    offRouteWarnThresholdM: Int,
-    backOnRouteThresholdM: Int,
     hasLocation: Boolean,
     onToggleAutoCenter: () -> Unit,
     onShowOfflineDialog: () -> Unit,
     onStopAll: () -> Unit,
-    onDecreaseOffRoute: () -> Unit,
-    onIncreaseOffRoute: () -> Unit,
-    onDecreaseBackOnRoute: () -> Unit,
-    onIncreaseBackOnRoute: () -> Unit,
 ) {
     Column(
         modifier =
@@ -881,18 +887,6 @@ private fun CompactRidePanel(
                 tone = ButtonTone.Neutral,
             ) { Text("Offline okolí") }
             SmallButton(onClick = onStopAll, height = 28.dp, tone = ButtonTone.Danger) { Text("Konec") }
-            ThresholdAdjuster(
-                label = "Mimo",
-                value = "${offRouteWarnThresholdM} m",
-                onDecrease = onDecreaseOffRoute,
-                onIncrease = onIncreaseOffRoute,
-            )
-            ThresholdAdjuster(
-                label = "Zpět",
-                value = "${backOnRouteThresholdM} m",
-                onDecrease = onDecreaseBackOnRoute,
-                onIncrease = onIncreaseBackOnRoute,
-            )
         }
     }
 }
@@ -920,28 +914,6 @@ private fun StatusChip(label: String, background: Color, foreground: Color) {
                 .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
         Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = foreground)
-    }
-}
-
-@Composable
-private fun ThresholdAdjuster(
-    label: String,
-    value: String,
-    onDecrease: () -> Unit,
-    onIncrease: () -> Unit,
-) {
-    Row(
-        modifier =
-            Modifier
-                .background(Color.White, RoundedCornerShape(12.dp))
-                .padding(start = 8.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, fontSize = 10.sp, color = Color(0xFF65727D))
-        SmallButton(onClick = onDecrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("-") }
-        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1D2A34))
-        SmallButton(onClick = onIncrease, height = 24.dp, tone = ButtonTone.Neutral) { Text("+") }
     }
 }
 
