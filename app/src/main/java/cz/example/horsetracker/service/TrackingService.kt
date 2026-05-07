@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
+import android.media.AudioAttributes
 import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
@@ -447,7 +448,7 @@ class TrackingService : Service() {
             TextToSpeech(this) { status ->
                 if (status == TextToSpeech.SUCCESS) {
                     ttsReady = true
-                    tts?.language = Locale("cs", "CZ")
+                    configureTts()
                     tts?.setOnUtteranceProgressListener(
                         object : UtteranceProgressListener() {
                             override fun onStart(utteranceId: String?) = Unit
@@ -469,11 +470,49 @@ class TrackingService : Service() {
                         },
                     )
                     pendingSpeech?.let { (text, utteranceId) ->
-                        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                        speak(text, utteranceId)
                         pendingSpeech = null
                     }
                 }
             }
+    }
+
+    private fun configureTts() {
+        val engine = tts ?: return
+        engine.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .build(),
+        )
+
+        val preferredLocales =
+            listOf(
+                Locale("cs", "CZ"),
+                Locale("cs"),
+                Locale.getDefault(),
+                Locale.ENGLISH,
+            ).distinct()
+
+        val supportedLocale =
+            preferredLocales.firstOrNull { locale ->
+                engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE
+            }
+
+        if (supportedLocale != null) {
+            val languageResult = engine.setLanguage(supportedLocale)
+            ttsReady =
+                languageResult != TextToSpeech.LANG_MISSING_DATA &&
+                    languageResult != TextToSpeech.LANG_NOT_SUPPORTED
+        }
+    }
+
+    private fun speak(text: String, utteranceId: String) {
+        if (ttsReady) {
+            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+        } else {
+            pendingSpeech = text to utteranceId
+        }
     }
 
     private fun speakWaypoint(label: String?, reverse: Boolean) {
@@ -482,11 +521,7 @@ class TrackingService : Service() {
 
         val spoken = if (reverse) reverseDirectionWords(trimmed) else trimmed
         val utteranceId = "tap_${System.currentTimeMillis()}"
-        if (ttsReady) {
-            tts?.speak(spoken, TextToSpeech.QUEUE_ADD, null, utteranceId)
-        } else {
-            pendingSpeech = spoken to utteranceId
-        }
+        speak(spoken, utteranceId)
     }
 
     private fun maybeAnnounceNearbyWaypoint(location: Location, previousLocation: Location?) {
@@ -529,7 +564,7 @@ class TrackingService : Service() {
                 } else {
                     label
                 }
-            tts?.speak(spokenLabel, TextToSpeech.QUEUE_ADD, null, key)
+            speak(spokenLabel, key)
         }
     }
 
@@ -548,10 +583,8 @@ class TrackingService : Service() {
                     Geo.SIDE_RIGHT -> " trasa je vlevo"
                     else -> ""
                 }
-            tts?.speak(
+            speak(
                 "Pozor, jste mimo trasu o více než ${warnThreshold.toInt()} metrů$sideText.",
-                TextToSpeech.QUEUE_ADD,
-                null,
                 "offroute_warn",
             )
             return
@@ -560,10 +593,8 @@ class TrackingService : Service() {
         // Po návratu blízko trasy znovu povol další off-route upozornění.
         if (offRouteWarned && offRoute <= backThreshold) {
             offRouteWarned = false
-            tts?.speak(
+            speak(
                 "Jste zpět na trase.",
-                TextToSpeech.QUEUE_ADD,
-                null,
                 "back_on_route",
             )
         }
@@ -593,10 +624,8 @@ class TrackingService : Service() {
         val progressDeltaM = progress - previousProgress
         if (!wrongDirectionWarned && progressDeltaM <= -WRONG_DIRECTION_BACKTRACK_M) {
             wrongDirectionWarned = true
-            tts?.speak(
+            speak(
                 "Pozor, jdete v protisměru po trase.",
-                TextToSpeech.QUEUE_ADD,
-                null,
                 "wrong_direction",
             )
             return
@@ -627,10 +656,8 @@ class TrackingService : Service() {
         }
         if (distanceToEnd > 20.0) return
         destinationAnnounced = true
-        tts?.speak(
+        speak(
             "Dojeli jste do cíle.",
-            TextToSpeech.QUEUE_ADD,
-            null,
             "destination_reached",
         )
     }
@@ -660,11 +687,7 @@ class TrackingService : Service() {
 
     private fun speakAndStopAfterCompletion(text: String, utteranceId: String) {
         pendingStopAfterUtteranceId = utteranceId
-        if (ttsReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
-        } else {
-            pendingSpeech = text to utteranceId
-        }
+        speak(text, utteranceId)
         mainHandler.postDelayed(
             {
                 if (pendingStopAfterUtteranceId == utteranceId) {
