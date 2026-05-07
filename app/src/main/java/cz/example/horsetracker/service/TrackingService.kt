@@ -30,6 +30,7 @@ import cz.example.horsetracker.permissions.Permissions
 import cz.example.horsetracker.ride.RideRepository
 import cz.example.horsetracker.ride.TrackPoint
 import cz.example.horsetracker.ride.Waypoint
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
@@ -41,7 +42,7 @@ class TrackingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var pendingSpeech: Pair<String, String>? = null
+    private val pendingSpeech = ArrayDeque<SpeechRequest>()
     private var isRecording = false
     private var isFollowing = false
     private var offRouteWarned = false
@@ -54,8 +55,15 @@ class TrackingService : Service() {
     private var waitingForFirstRecordedPointAfterWarmup = false
     private var autoFinishTriggered = false
     private var pendingStopAfterUtteranceId: String? = null
+    private val stopServiceAfterUtteranceIds = ConcurrentHashMap.newKeySet<String>()
     private val announcedWaypointAtMs = ConcurrentHashMap<String, Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private data class SpeechRequest(
+        val text: String,
+        val utteranceId: String,
+        val stopServiceWhenDone: Boolean,
+    )
 
     private val listener =
         LocationListener { location ->
@@ -389,7 +397,9 @@ class TrackingService : Service() {
         tts?.shutdown()
         tts = null
         ttsReady = false
-        pendingSpeech = null
+        pendingSpeech.clear()
+        pendingStopAfterUtteranceId = null
+        stopServiceAfterUtteranceIds.clear()
         super.onDestroy()
     }
 
@@ -446,32 +456,31 @@ class TrackingService : Service() {
         ttsReady = false
         tts =
             TextToSpeech(this) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    ttsReady = true
-                    configureTts()
-                    tts?.setOnUtteranceProgressListener(
-                        object : UtteranceProgressListener() {
-                            override fun onStart(utteranceId: String?) = Unit
+                mainHandler.post {
+                    if (status == TextToSpeech.SUCCESS) {
+                        configureTts()
+                        tts?.setOnUtteranceProgressListener(
+                            object : UtteranceProgressListener() {
+                                override fun onStart(utteranceId: String?) = Unit
 
-                            override fun onDone(utteranceId: String?) {
-                                if (utteranceId != null && utteranceId == pendingStopAfterUtteranceId) {
-                                    pendingStopAfterUtteranceId = null
-                                    mainHandler.post { stopRecording() }
+                                override fun onDone(utteranceId: String?) {
+                                    utteranceId?.let { mainHandler.post { handleUtteranceFinished(it) } }
                                 }
-                            }
 
-                            @Deprecated("Deprecated in Java")
-                            override fun onError(utteranceId: String?) {
-                                if (utteranceId != null && utteranceId == pendingStopAfterUtteranceId) {
-                                    pendingStopAfterUtteranceId = null
-                                    mainHandler.post { stopRecording() }
+                                @Deprecated("Deprecated in Java")
+                                override fun onError(utteranceId: String?) {
+                                    utteranceId?.let { mainHandler.post { handleUtteranceFinished(it) } }
                                 }
-                            }
-                        },
-                    )
-                    pendingSpeech?.let { (text, utteranceId) ->
-                        speak(text, utteranceId)
-                        pendingSpeech = null
+                            },
+                        )
+                        if (ttsReady) {
+                            drainPendingSpeech()
+                        } else {
+                            finishPendingSpeechWithoutAudio()
+                        }
+                    } else {
+                        ttsReady = false
+                        finishPendingSpeechWithoutAudio()
                     }
                 }
             }
@@ -479,6 +488,7 @@ class TrackingService : Service() {
 
     private fun configureTts() {
         val engine = tts ?: return
+        ttsReady = false
         engine.setAudioAttributes(
             AudioAttributes.Builder()
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -507,11 +517,66 @@ class TrackingService : Service() {
         }
     }
 
-    private fun speak(text: String, utteranceId: String) {
-        if (ttsReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+    private fun drainPendingSpeech() {
+        while (pendingSpeech.isNotEmpty()) {
+            val request = pendingSpeech.removeFirst()
+            speak(request.text, request.utteranceId, request.stopServiceWhenDone)
+        }
+    }
+
+    private fun finishPendingSpeechWithoutAudio() {
+        while (pendingSpeech.isNotEmpty()) {
+            val request = pendingSpeech.removeFirst()
+            if (request.stopServiceWhenDone && !isRecording && !isFollowing) {
+                stopSelf()
+            } else {
+                handleUtteranceFinished(request.utteranceId)
+            }
+        }
+    }
+
+    private fun handleUtteranceFinished(utteranceId: String) {
+        if (utteranceId == pendingStopAfterUtteranceId) {
+            pendingStopAfterUtteranceId = null
+            stopRecording()
+        }
+        if (stopServiceAfterUtteranceIds.remove(utteranceId) && !isRecording && !isFollowing) {
+            stopSelf()
+        }
+    }
+
+    private fun speak(
+        text: String,
+        utteranceId: String,
+        stopServiceWhenDone: Boolean = false,
+    ) {
+        val engine = tts
+        if (ttsReady && engine != null) {
+            if (stopServiceWhenDone) {
+                stopServiceAfterUtteranceIds += utteranceId
+                mainHandler.postDelayed(
+                    {
+                        if (stopServiceAfterUtteranceIds.remove(utteranceId) && !isRecording && !isFollowing) {
+                            stopSelf()
+                        }
+                    },
+                    ONE_SHOT_TTS_FALLBACK_MS,
+                )
+            }
+            val result = engine.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+            if (result == TextToSpeech.ERROR) {
+                handleUtteranceFinished(utteranceId)
+            }
         } else {
-            pendingSpeech = text to utteranceId
+            pendingSpeech += SpeechRequest(text, utteranceId, stopServiceWhenDone)
+            mainHandler.postDelayed(
+                {
+                    if (!ttsReady) {
+                        finishPendingSpeechWithoutAudio()
+                    }
+                },
+                TTS_INIT_FALLBACK_MS,
+            )
         }
     }
 
@@ -521,7 +586,7 @@ class TrackingService : Service() {
 
         val spoken = if (reverse) reverseDirectionWords(trimmed) else trimmed
         val utteranceId = "tap_${System.currentTimeMillis()}"
-        speak(spoken, utteranceId)
+        speak(spoken, utteranceId, stopServiceWhenDone = !isRecording && !isFollowing)
     }
 
     private fun maybeAnnounceNearbyWaypoint(location: Location, previousLocation: Location?) {
@@ -735,6 +800,8 @@ class TrackingService : Service() {
         private const val AUTO_FINISH_RADIUS_M = 20.0
         private const val AUTO_FINISH_MIN_DURATION_MS = 10 * 60 * 1000L
         private const val AUTO_FINISH_TTS_FALLBACK_MS = 8_000L
+        private const val TTS_INIT_FALLBACK_MS = 8_000L
+        private const val ONE_SHOT_TTS_FALLBACK_MS = 8_000L
         private const val WRONG_DIRECTION_MIN_MOVE_M = 5.0
         private const val WRONG_DIRECTION_BACKTRACK_M = 8.0
         private const val WRONG_DIRECTION_RECOVER_M = 4.0
