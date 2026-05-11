@@ -37,6 +37,9 @@ object RideRepository {
     val events = _events.asSharedFlow()
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val cloudSyncLock = Any()
+    private var cloudSyncRunning = false
+    private var cloudSyncRequested = false
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -47,6 +50,7 @@ object RideRepository {
             val stats = computeStats(context, horses)
             val rides = listRidesInternal(context, selected)
             val (warnM, backM) = FollowSettingsStorage.load(context)
+            val cloud = CloudSettingsStorage.load(context)
             val baseState =
                 _state.value.copy(
                     isLoadingData = false,
@@ -56,6 +60,9 @@ object RideRepository {
                     rides = rides,
                     offRouteWarnThresholdM = warnM,
                     backOnRouteThresholdM = backM,
+                    cloudEndpointUrl = cloud.endpointUrl,
+                    cloudToken = cloud.token,
+                    cloudSyncEnabled = cloud.enabled,
                 )
             val restored = restoreDraftIfAvailable(context, baseState)
             _state.value = restored
@@ -71,6 +78,7 @@ object RideRepository {
         _state.value = _state.value.copy(selectedHorseId = horseId)
         refreshRides(context)
         refreshStats(context)
+        scheduleCloudUpload(context)
     }
 
     fun addHorse(context: Context, name: String) {
@@ -81,6 +89,7 @@ object RideRepository {
             _state.value = _state.value.copy(horses = horses, selectedHorseId = horse.id, horseStats = stats)
             SelectionStorage.setSelectedHorseId(context, horse.id)
             refreshRides(context)
+            scheduleCloudUpload(context)
         }
     }
 
@@ -116,6 +125,7 @@ object RideRepository {
                     )
 
                 _events.tryEmit(UiEvent.Message("Kůň smazán včetně jeho jízd."))
+                scheduleCloudUpload(context)
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Mazání koně selhalo: ${t.message ?: t::class.java.simpleName}"))
             }
@@ -153,6 +163,7 @@ object RideRepository {
         val back = prev.backOnRouteThresholdM.coerceAtMost(next - 1.0).coerceAtLeast(1.0)
         _state.value = prev.copy(offRouteWarnThresholdM = next, backOnRouteThresholdM = back)
         appContext?.let { FollowSettingsStorage.save(it, next, back) }
+        appContext?.let { scheduleCloudUpload(it) }
     }
 
     fun updateBackOnRouteThreshold(deltaM: Double) {
@@ -161,6 +172,7 @@ object RideRepository {
         val next = (prev.backOnRouteThresholdM + deltaM).coerceIn(1.0, maxBack)
         _state.value = prev.copy(backOnRouteThresholdM = next)
         appContext?.let { FollowSettingsStorage.save(it, prev.offRouteWarnThresholdM, next) }
+        appContext?.let { scheduleCloudUpload(it) }
     }
 
     fun onLocation(point: TrackPoint) {
@@ -472,6 +484,7 @@ object RideRepository {
                 File(ridesDir, meta.metaFileName).delete()
                 refreshStats(context)
                 refreshRides(context, horseIdFilter)
+                scheduleCloudUpload(context)
                 _events.tryEmit(UiEvent.Message("Jízda smazána."))
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Mazání selhalo: ${t.message ?: t::class.java.simpleName}"))
@@ -602,9 +615,55 @@ object RideRepository {
             try {
                 AppBackupStorage.import(context, sourceUri)
                 reloadFromStorage(context, _state.value)
+                scheduleCloudUpload(context)
                 _events.tryEmit(UiEvent.Message("Backup obnoven."))
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Import backupu selhal: ${t.message ?: t::class.java.simpleName}"))
+            }
+        }
+    }
+
+    fun updateCloudSettings(context: Context, endpointUrl: String, token: String, enabled: Boolean) {
+        val settings =
+            CloudSettingsStorage.CloudSettings(
+                endpointUrl = endpointUrl.trim(),
+                token = token.trim(),
+                enabled = enabled,
+            )
+        CloudSettingsStorage.save(context, settings)
+        _state.value =
+            _state.value.copy(
+                cloudEndpointUrl = settings.endpointUrl,
+                cloudToken = settings.token,
+                cloudSyncEnabled = settings.enabled,
+                cloudSyncStatus = if (settings.isConfigured) "Cloud sync zapnutý." else "Cloud sync vypnutý.",
+            )
+        if (settings.isConfigured) scheduleCloudUpload(context)
+    }
+
+    fun restoreFromCloud(context: Context) {
+        if (_state.value.isRecording || _state.value.isFollowing) {
+            _events.tryEmit(UiEvent.Message("Cloud obnovu nelze spustit během aktivního záznamu nebo follow režimu."))
+            return
+        }
+
+        val settings = CloudSettingsStorage.load(context)
+        if (!settings.isConfigured) {
+            _events.tryEmit(UiEvent.Message("Cloud URL není nastavena nebo sync není zapnutý."))
+            return
+        }
+
+        ioScope.launch {
+            _state.value = _state.value.copy(cloudSyncStatus = "Cloud: obnovuji...")
+            try {
+                CloudBackupSync.restore(context.applicationContext, settings)
+                reloadFromStorage(context, _state.value.copy(cloudSyncStatus = "Cloud: obnoveno."))
+                scheduleCloudUpload(context)
+                _events.tryEmit(UiEvent.Message("Cloud obnova hotova."))
+            } catch (t: Throwable) {
+                val message = "Cloud obnova selhala: ${t.message ?: t::class.java.simpleName}"
+                _state.value = _state.value.copy(cloudSyncStatus = message)
+                _events.tryEmit(UiEvent.Message(message))
             }
         }
     }
@@ -707,6 +766,57 @@ object RideRepository {
         }
     }
 
+    private fun scheduleCloudUpload(context: Context) {
+        val app = context.applicationContext
+        val settings = CloudSettingsStorage.load(app)
+        if (!settings.isConfigured) return
+
+        synchronized(cloudSyncLock) {
+            if (cloudSyncRunning) {
+                cloudSyncRequested = true
+                return
+            }
+            cloudSyncRunning = true
+        }
+
+        ioScope.launch {
+            while (true) {
+                val currentSettings = CloudSettingsStorage.load(app)
+                if (!currentSettings.isConfigured) {
+                    _state.value = _state.value.copy(cloudSyncStatus = "Cloud sync vypnutý.")
+                    synchronized(cloudSyncLock) {
+                        cloudSyncRunning = false
+                        cloudSyncRequested = false
+                    }
+                    return@launch
+                }
+
+                _state.value = _state.value.copy(cloudSyncStatus = "Cloud: ukládám...")
+                val result = runCatching { CloudBackupSync.upload(app, currentSettings) }
+                _state.value =
+                    _state.value.copy(
+                        cloudSyncStatus =
+                            result.fold(
+                                onSuccess = { "Cloud: uloženo ${formatClock(System.currentTimeMillis())}" },
+                                onFailure = { "Cloud chyba: ${it.message ?: it::class.java.simpleName}" },
+                            ),
+                    )
+
+                val runAgain =
+                    synchronized(cloudSyncLock) {
+                        if (cloudSyncRequested) {
+                            cloudSyncRequested = false
+                            true
+                        } else {
+                            cloudSyncRunning = false
+                            false
+                        }
+                    }
+                if (!runAgain) return@launch
+            }
+        }
+    }
+
     private fun reloadFromStorage(context: Context, baseState: AppState = _state.value) {
         appContext = context.applicationContext
         _state.value = baseState.copy(isLoadingData = true)
@@ -716,6 +826,7 @@ object RideRepository {
             val stats = computeStats(context, horses)
             val rides = listRidesInternal(context, selected)
             val (warnM, backM) = FollowSettingsStorage.load(context)
+            val cloud = CloudSettingsStorage.load(context)
             _state.value =
                 baseState.copy(
                     isLoadingData = false,
@@ -725,6 +836,9 @@ object RideRepository {
                     rides = rides,
                     offRouteWarnThresholdM = warnM,
                     backOnRouteThresholdM = backM,
+                    cloudEndpointUrl = cloud.endpointUrl,
+                    cloudToken = cloud.token,
+                    cloudSyncEnabled = cloud.enabled,
                 )
         }
     }
@@ -869,6 +983,7 @@ object RideRepository {
             refreshRides(context)
 
             _events.tryEmit(UiEvent.RideSaved(gpxFile.absolutePath))
+            scheduleCloudUpload(context)
         } catch (t: Throwable) {
             _events.tryEmit(UiEvent.Message("Uložení selhalo: ${t.message ?: t::class.java.simpleName}"))
         }
@@ -881,6 +996,9 @@ object RideRepository {
         val horse = sanitizeName(horseName)
         return "$date $horse"
     }
+
+    private fun formatClock(epochMs: Long): String =
+        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochMs))
 
     private fun ensureUniqueBaseName(ridesDir: File, baseName: String, ts: Long): String {
         val gpx = File(ridesDir, "$baseName.gpx")

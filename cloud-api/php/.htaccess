@@ -1,0 +1,9 @@
+DirectoryIndex index.php
+
+<FilesMatch "^config(\.example)?\.php$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>

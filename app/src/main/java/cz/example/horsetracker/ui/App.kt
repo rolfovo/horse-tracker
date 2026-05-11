@@ -88,7 +88,17 @@ fun App(
     var pendingRideExport by remember { mutableStateOf<RideSummary?>(null) }
     var pendingHorseImport by remember { mutableStateOf<Horse?>(null) }
     var showImportBackupConfirm by remember { mutableStateOf(false) }
+    var showCloudRestoreConfirm by remember { mutableStateOf(false) }
+    var cloudEndpointUrl by rememberSaveable { mutableStateOf("") }
+    var cloudToken by rememberSaveable { mutableStateOf("") }
+    var cloudSyncEnabled by rememberSaveable { mutableStateOf(false) }
     var exitAfterRideSave by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.cloudEndpointUrl, state.cloudToken, state.cloudSyncEnabled) {
+        cloudEndpointUrl = state.cloudEndpointUrl
+        cloudToken = state.cloudToken
+        cloudSyncEnabled = state.cloudSyncEnabled
+    }
 
     val voiceNoteLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -191,8 +201,19 @@ fun App(
                 }
             },
             onImportBackup = { showImportBackupConfirm = true },
+            onSaveCloudSettings = {
+                RideRepository.updateCloudSettings(context, cloudEndpointUrl, cloudToken, cloudSyncEnabled)
+            },
+            onRestoreFromCloud = { showCloudRestoreConfirm = true },
             backupActionsEnabled = !state.isRecording && !state.isFollowing,
             hasBackupData = state.horses.isNotEmpty() || state.rides.isNotEmpty(),
+            cloudEndpointUrl = cloudEndpointUrl,
+            onCloudEndpointUrlChange = { cloudEndpointUrl = it },
+            cloudToken = cloudToken,
+            onCloudTokenChange = { cloudToken = it },
+            cloudSyncEnabled = cloudSyncEnabled,
+            onCloudSyncEnabledChange = { cloudSyncEnabled = it },
+            cloudSyncStatus = state.cloudSyncStatus,
         )
         if (showImportBackupConfirm) {
             AlertDialog(
@@ -213,6 +234,24 @@ fun App(
                 },
                 dismissButton = {
                     SmallButton(onClick = { showImportBackupConfirm = false }) { Text("Zrušit") }
+                },
+            )
+        }
+        if (showCloudRestoreConfirm) {
+            AlertDialog(
+                onDismissRequest = { showCloudRestoreConfirm = false },
+                title = { Text("Obnova z cloudu") },
+                text = { Text("Obnova sloučí cloud data s lokálními koňmi a jízdami. Nastavení trasy se vezme z cloudu. Pokračovat?") },
+                confirmButton = {
+                    SmallButton(
+                        onClick = {
+                            showCloudRestoreConfirm = false
+                            RideRepository.restoreFromCloud(context)
+                        },
+                    ) { Text("Obnovit") }
+                },
+                dismissButton = {
+                    SmallButton(onClick = { showCloudRestoreConfirm = false }) { Text("Zrušit") }
                 },
             )
         }
@@ -623,8 +662,17 @@ private fun HorseSelectScreen(
     onImportGpx: (Horse) -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onSaveCloudSettings: () -> Unit,
+    onRestoreFromCloud: () -> Unit,
     backupActionsEnabled: Boolean,
     hasBackupData: Boolean,
+    cloudEndpointUrl: String,
+    onCloudEndpointUrlChange: (String) -> Unit,
+    cloudToken: String,
+    onCloudTokenChange: (String) -> Unit,
+    cloudSyncEnabled: Boolean,
+    onCloudSyncEnabledChange: (Boolean) -> Unit,
+    cloudSyncStatus: String,
 ) {
     var newHorse by remember { mutableStateOf("") }
     var statsHorse by remember { mutableStateOf<Horse?>(null) }
@@ -694,6 +742,44 @@ private fun HorseSelectScreen(
                 modifier = Modifier.weight(1f),
                 enabled = backupActionsEnabled,
             ) { Text("Import backup") }
+        }
+        Text("Cloud sync", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(
+            value = cloudEndpointUrl,
+            onValueChange = onCloudEndpointUrlChange,
+            label = { Text("Cloud API URL") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = cloudToken,
+            onValueChange = onCloudTokenChange,
+            label = { Text("Bearer token") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            SmallButton(
+                onClick = { onCloudSyncEnabledChange(!cloudSyncEnabled) },
+                modifier = Modifier.weight(1f),
+                enabled = backupActionsEnabled,
+                tone = if (cloudSyncEnabled) ButtonTone.Selected else ButtonTone.Neutral,
+            ) { Text(if (cloudSyncEnabled) "Sync ON" else "Sync OFF") }
+            SmallButton(
+                onClick = onSaveCloudSettings,
+                modifier = Modifier.weight(1f),
+                enabled = backupActionsEnabled,
+                tone = ButtonTone.Accent,
+            ) { Text("Uložit") }
+            SmallButton(
+                onClick = onRestoreFromCloud,
+                modifier = Modifier.weight(1f),
+                enabled = backupActionsEnabled && cloudEndpointUrl.isNotBlank() && cloudSyncEnabled,
+                tone = ButtonTone.Neutral,
+            ) { Text("Obnovit") }
+        }
+        if (cloudSyncStatus.isNotBlank()) {
+            Text(cloudSyncStatus, fontSize = 12.sp, color = Color(0xFF5F6B76))
         }
     }
 

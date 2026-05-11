@@ -85,6 +85,10 @@ data class AppState(
     val offRouteMeters: Double = 0.0,
     val offRouteWarnThresholdM: Double = 30.0,
     val backOnRouteThresholdM: Double = 5.0,
+    val cloudEndpointUrl: String = "",
+    val cloudToken: String = "",
+    val cloudSyncEnabled: Boolean = false,
+    val cloudSyncStatus: String = "",
     val mapState: MapState = MapState(),
 ) {
     val waypoints: List<Waypoint>
