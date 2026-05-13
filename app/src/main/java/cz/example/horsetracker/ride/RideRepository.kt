@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.Intent
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.FileProvider
 import cz.example.horsetracker.geo.Geo
 import cz.example.horsetracker.map.OfflineTilePrefetcher
@@ -24,6 +25,7 @@ import java.util.Date
 import java.util.Locale
 
 object RideRepository {
+    private const val CLOUD_LOG_TAG = "HorseTrackerCloud"
     private val _state = MutableStateFlow(AppState(isLoadingData = true))
     val state = _state.asStateFlow()
     private var appContext: Context? = null
@@ -638,7 +640,11 @@ object RideRepository {
                 cloudSyncEnabled = settings.enabled,
                 cloudSyncStatus = if (settings.isConfigured) "Cloud sync zapnutý." else "Cloud sync vypnutý.",
             )
-        if (settings.isConfigured) scheduleCloudUpload(context)
+        if (settings.isConfigured) {
+            scheduleCloudUpload(context, settings)
+        } else {
+            Log.i(CLOUD_LOG_TAG, "Cloud sync disabled or missing URL.")
+        }
     }
 
     fun restoreFromCloud(context: Context) {
@@ -656,11 +662,13 @@ object RideRepository {
         ioScope.launch {
             _state.value = _state.value.copy(cloudSyncStatus = "Cloud: obnovuji...")
             try {
+                Log.i(CLOUD_LOG_TAG, "Restoring cloud backup from ${settings.endpointUrl}.")
                 CloudBackupSync.restore(context.applicationContext, settings)
                 reloadFromStorage(context, _state.value.copy(cloudSyncStatus = "Cloud: obnoveno."))
                 scheduleCloudUpload(context)
                 _events.tryEmit(UiEvent.Message("Cloud obnova hotova."))
             } catch (t: Throwable) {
+                Log.e(CLOUD_LOG_TAG, "Cloud restore failed.", t)
                 val message = "Cloud obnova selhala: ${t.message ?: t::class.java.simpleName}"
                 _state.value = _state.value.copy(cloudSyncStatus = message)
                 _events.tryEmit(UiEvent.Message(message))
@@ -766,13 +774,20 @@ object RideRepository {
         }
     }
 
-    private fun scheduleCloudUpload(context: Context) {
+    private fun scheduleCloudUpload(
+        context: Context,
+        initialSettings: CloudSettingsStorage.CloudSettings? = null,
+    ) {
         val app = context.applicationContext
-        val settings = CloudSettingsStorage.load(app)
-        if (!settings.isConfigured) return
+        val settings = initialSettings ?: CloudSettingsStorage.load(app)
+        if (!settings.isConfigured) {
+            Log.d(CLOUD_LOG_TAG, "Cloud upload skipped: sync disabled or URL missing.")
+            return
+        }
 
         synchronized(cloudSyncLock) {
             if (cloudSyncRunning) {
+                Log.d(CLOUD_LOG_TAG, "Cloud upload already running, scheduling another pass.")
                 cloudSyncRequested = true
                 return
             }
@@ -780,10 +795,13 @@ object RideRepository {
         }
 
         ioScope.launch {
+            var pendingSettings: CloudSettingsStorage.CloudSettings? = settings
             while (true) {
-                val currentSettings = CloudSettingsStorage.load(app)
+                val currentSettings = pendingSettings ?: CloudSettingsStorage.load(app)
+                pendingSettings = null
                 if (!currentSettings.isConfigured) {
                     _state.value = _state.value.copy(cloudSyncStatus = "Cloud sync vypnutý.")
+                    Log.i(CLOUD_LOG_TAG, "Cloud upload stopped: sync disabled or URL missing.")
                     synchronized(cloudSyncLock) {
                         cloudSyncRunning = false
                         cloudSyncRequested = false
@@ -792,7 +810,11 @@ object RideRepository {
                 }
 
                 _state.value = _state.value.copy(cloudSyncStatus = "Cloud: ukládám...")
+                Log.i(CLOUD_LOG_TAG, "Uploading cloud backup to ${currentSettings.endpointUrl}.")
                 val result = runCatching { CloudBackupSync.upload(app, currentSettings) }
+                result
+                    .onSuccess { Log.i(CLOUD_LOG_TAG, "Cloud upload finished successfully.") }
+                    .onFailure { Log.e(CLOUD_LOG_TAG, "Cloud upload failed.", it) }
                 _state.value =
                     _state.value.copy(
                         cloudSyncStatus =

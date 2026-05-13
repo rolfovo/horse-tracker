@@ -32,6 +32,7 @@ import com.mapbox.mapboxsdk.style.layers.FillLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.Property
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
+import com.mapbox.mapboxsdk.style.sources.GeoJsonOptions
 import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
 import kotlin.math.PI
 import kotlin.math.cos
@@ -93,6 +94,8 @@ private const val SOURCE_USER_ARROW = "user_arrow"
 private const val SOURCE_SNAP = "snap"
 private val DEFAULT_MAP_CENTER = LatLng(49.8175, 15.4730)
 private const val DEFAULT_MAP_ZOOM = 7.2
+private const val TRACK_SOURCE_BUFFER = 256
+private const val TRACK_SOURCE_TOLERANCE = 0.0f
 
 private fun updateMap(
     mapView: MapView,
@@ -233,25 +236,14 @@ private fun buildOsmRasterStyle(context: Context): Style.Builder {
 }
 
 private fun attachLayers(style: Style) {
-    style.addSource(GeoJsonSource(SOURCE_SEGMENTS, FeatureCollection.fromFeatures(emptyArray())))
+    style.addSource(GeoJsonSource(SOURCE_SEGMENTS, FeatureCollection.fromFeatures(emptyArray()), trackGeoJsonOptions()))
     style.addSource(GeoJsonSource(SOURCE_WAYPOINTS, FeatureCollection.fromFeatures(emptyArray())))
-    style.addSource(GeoJsonSource(SOURCE_FOLLOW, FeatureCollection.fromFeatures(emptyArray())))
+    style.addSource(GeoJsonSource(SOURCE_FOLLOW, FeatureCollection.fromFeatures(emptyArray()), trackGeoJsonOptions()))
     style.addSource(GeoJsonSource(SOURCE_USER, FeatureCollection.fromFeatures(emptyArray())))
     style.addSource(GeoJsonSource(SOURCE_USER_ARROW, FeatureCollection.fromFeatures(emptyArray())))
     style.addSource(GeoJsonSource(SOURCE_SNAP, FeatureCollection.fromFeatures(emptyArray())))
 
-    val speedColor =
-        Expression.interpolate(
-            Expression.linear(),
-            Expression.get("speed_mps"),
-            Expression.stop(0.0, Expression.color(Color.argb(255, 35, 107, 173))),   // very slow
-            Expression.stop(0.7, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~2.5 km/h
-            Expression.stop(1.25, Expression.color(Color.argb(255, 92, 184, 92))),   // walk upper ~4.5 km/h
-            Expression.stop(1.9, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~6.8 km/h
-            Expression.stop(2.58, Expression.color(Color.argb(255, 240, 183, 63))),  // trot upper ~9.3 km/h
-            Expression.stop(3.28, Expression.color(Color.argb(255, 235, 126, 63))),  // canter start ~11.8 km/h
-            Expression.stop(5.0, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~18.0 km/h
-        )
+    val speedColor = speedColorExpression()
 
     style.addLayer(
         LineLayer("ride_line", SOURCE_SEGMENTS).withProperties(
@@ -263,31 +255,13 @@ private fun attachLayers(style: Style) {
         ),
     )
 
-    val followColor =
-        Expression.switchCase(
-            Expression.eq(Expression.get("active"), Expression.literal(1)),
-            Expression.color(Color.argb(255, 214, 74, 62)),
-            Expression.match(
-                Expression.get("band"),
-                Expression.literal(0),
-                Expression.color(Color.argb(255, 35, 107, 173)),
-                Expression.literal(1),
-                Expression.color(Color.argb(255, 92, 184, 92)),
-                Expression.literal(2),
-                Expression.color(Color.argb(255, 240, 183, 63)),
-                Expression.literal(3),
-                Expression.color(Color.argb(255, 214, 74, 62)),
-                Expression.color(Color.argb(255, 214, 74, 62)),
-            ),
-        )
-
     style.addLayer(
         LineLayer("follow_line", SOURCE_FOLLOW).withProperties(
             PropertyFactory.lineWidth(5f),
             PropertyFactory.lineOpacity(0.95f),
             PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
             PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
-            PropertyFactory.lineColor(followColor),
+            PropertyFactory.lineColor(speedColor),
         ),
     )
 
@@ -326,24 +300,31 @@ private fun attachLayers(style: Style) {
     )
 }
 
+private fun trackGeoJsonOptions(): GeoJsonOptions =
+    GeoJsonOptions()
+        .withBuffer(TRACK_SOURCE_BUFFER)
+        .withTolerance(TRACK_SOURCE_TOLERANCE)
+
+private fun speedColorExpression(): Expression =
+    Expression.interpolate(
+        Expression.linear(),
+        Expression.get("speed_mps"),
+        Expression.stop(0.0, Expression.color(Color.argb(255, 35, 107, 173))),   // very slow
+        Expression.stop(0.7, Expression.color(Color.argb(255, 45, 158, 120))),   // walk start ~2.5 km/h
+        Expression.stop(1.25, Expression.color(Color.argb(255, 92, 184, 92))),   // walk upper ~4.5 km/h
+        Expression.stop(1.9, Expression.color(Color.argb(255, 177, 196, 74))),   // trot start ~6.8 km/h
+        Expression.stop(2.58, Expression.color(Color.argb(255, 240, 183, 63))),  // trot upper ~9.3 km/h
+        Expression.stop(3.28, Expression.color(Color.argb(255, 235, 126, 63))),  // canter start ~11.8 km/h
+        Expression.stop(5.0, Expression.color(Color.argb(255, 214, 74, 62))),    // canter max ~18.0 km/h
+    )
+
 private fun render(style: Style, state: MapState) {
-    val segFeatures =
-        state.segments.map { seg ->
-            Feature.fromGeometry(
-                LineString.fromLngLats(
-                    listOf(
-                        Point.fromLngLat(seg.startLon, seg.startLat),
-                        Point.fromLngLat(seg.endLon, seg.endLat),
-                    ),
-                ),
-            ).apply { addNumberProperty("speed_mps", seg.speedMps) }
-        }
-    style.getSourceAs<GeoJsonSource>(SOURCE_SEGMENTS)?.setGeoJson(FeatureCollection.fromFeatures(segFeatures))
+    style.getSourceAs<GeoJsonSource>(SOURCE_SEGMENTS)?.setGeoJson(FeatureCollection.fromFeatures(buildSegmentFeatures(state.segments)))
 
     val wpFeatures = state.waypoints.map { w -> Feature.fromGeometry(Point.fromLngLat(w.lon, w.lat)) }
     style.getSourceAs<GeoJsonSource>(SOURCE_WAYPOINTS)?.setGeoJson(FeatureCollection.fromFeatures(wpFeatures))
 
-    val followFeatures = buildFollowFeatures(state.followSegments, state.followActive)
+    val followFeatures = buildSegmentFeatures(state.followSegments, state.followActive)
     style.getSourceAs<GeoJsonSource>(SOURCE_FOLLOW)?.setGeoJson(FeatureCollection.fromFeatures(followFeatures))
 
     val userFeature =
@@ -391,54 +372,19 @@ private fun buildBounds(route: List<Pair<Double, Double>>): LatLngBounds? {
     return builder.build()
 }
 
-private fun buildFollowFeatures(segments: List<SpeedSegment>, active: Boolean): List<Feature> {
-    if (segments.isEmpty()) return emptyList()
-
-    val features = ArrayList<Feature>()
-    var currentBand = speedBand(segments.first().speedMps)
-    val currentPoints =
-        ArrayList<Point>().apply {
-            add(Point.fromLngLat(segments.first().startLon, segments.first().startLat))
-            add(Point.fromLngLat(segments.first().endLon, segments.first().endLat))
+private fun buildSegmentFeatures(segments: List<SpeedSegment>, active: Boolean = false): List<Feature> =
+    segments.map { segment ->
+        Feature.fromGeometry(
+            LineString.fromLngLats(
+                listOf(
+                    Point.fromLngLat(segment.startLon, segment.startLat),
+                    Point.fromLngLat(segment.endLon, segment.endLat),
+                ),
+            ),
+        ).apply {
+            addNumberProperty("speed_mps", segment.speedMps)
+            addNumberProperty("active", if (active) 1.0 else 0.0)
         }
-
-    fun flush() {
-        if (currentPoints.size < 2) return
-        features +=
-            Feature.fromGeometry(LineString.fromLngLats(currentPoints.toList())).apply {
-                addNumberProperty("band", currentBand.toDouble())
-                addNumberProperty("active", if (active) 1.0 else 0.0)
-            }
-    }
-
-    for (i in 1 until segments.size) {
-        val segment = segments[i]
-        val band = speedBand(segment.speedMps)
-        val lastPoint = currentPoints.last()
-        val continues =
-            lastPoint.latitude() == segment.startLat &&
-                lastPoint.longitude() == segment.startLon &&
-                band == currentBand
-        if (continues) {
-            currentPoints.add(Point.fromLngLat(segment.endLon, segment.endLat))
-        } else {
-            flush()
-            currentPoints.clear()
-            currentBand = band
-            currentPoints.add(Point.fromLngLat(segment.startLon, segment.startLat))
-            currentPoints.add(Point.fromLngLat(segment.endLon, segment.endLat))
-        }
-    }
-    flush()
-    return features
-}
-
-private fun speedBand(speedMps: Double): Int =
-    when {
-        speedMps < 1.2 -> 0
-        speedMps < 2.7 -> 1
-        speedMps < 4.7 -> 2
-        else -> 3
     }
 
 private fun buildArrowPolygon(lat: Double, lon: Double, headingDeg: Double): Polygon {

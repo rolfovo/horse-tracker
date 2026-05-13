@@ -12,7 +12,7 @@ object CloudBackupSync {
         val temp = File(context.cacheDir, "horse_tracker_cloud_backup.zip")
         try {
             temp.outputStream().use { output -> AppBackupStorage.export(context, output) }
-            val connection = openConnection(settings, method = "PUT").apply {
+            val connection = openConnection(settings, method = "PUT", followRedirects = false).apply {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/zip")
                 setFixedLengthStreamingMode(temp.length())
@@ -30,7 +30,7 @@ object CloudBackupSync {
     fun restore(context: Context, settings: CloudSettingsStorage.CloudSettings) {
         require(settings.endpointUrl.isNotBlank()) { "Cloud URL is empty" }
 
-        val connection = openConnection(settings, method = "GET").apply {
+        val connection = openConnection(settings, method = "GET", followRedirects = true).apply {
             setRequestProperty("Accept", "application/zip")
         }
         connection.requireSuccess()
@@ -40,12 +40,13 @@ object CloudBackupSync {
     private fun openConnection(
         settings: CloudSettingsStorage.CloudSettings,
         method: String,
+        followRedirects: Boolean,
     ): HttpURLConnection {
         val connection = (URL(settings.endpointUrl).openConnection() as HttpURLConnection)
         connection.requestMethod = method
         connection.connectTimeout = 15_000
         connection.readTimeout = 45_000
-        connection.instanceFollowRedirects = true
+        connection.instanceFollowRedirects = followRedirects
         if (settings.token.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer ${settings.token}")
         }
@@ -54,7 +55,18 @@ object CloudBackupSync {
 
     private fun HttpURLConnection.requireSuccess() {
         val code = responseCode
-        if (code in 200..299) return
+        if (code in 200..299) {
+            val type = contentType.orEmpty()
+            if (type.contains("text/html", ignoreCase = true)) {
+                error("HTTP $code returned HTML instead of the backup API response. Use the final Cloud API URL, usually with trailing slash or /index.php.")
+            }
+            return
+        }
+
+        if (code in 300..399) {
+            val location = getHeaderField("Location").orEmpty()
+            error("HTTP $code redirect to $location. Use the final Cloud API URL, usually with trailing slash or /index.php.")
+        }
 
         val body =
             runCatching {
