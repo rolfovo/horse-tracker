@@ -542,6 +542,8 @@ function computeHorseStats(array $entries, array $horses): array
             'avgSpeedWeighted' => 0.0,
             'avgSpeedTimeMs' => 0,
             'maxSpeedMps' => 0.0,
+            'longestDistanceM' => 0.0,
+            'longestDurationMs' => 0,
             'lastRideMs' => 0,
         ];
     }
@@ -566,6 +568,8 @@ function computeHorseStats(array $entries, array $horses): array
                 'avgSpeedWeighted' => 0.0,
                 'avgSpeedTimeMs' => 0,
                 'maxSpeedMps' => 0.0,
+                'longestDistanceM' => 0.0,
+                'longestDurationMs' => 0,
                 'lastRideMs' => 0,
             ];
         }
@@ -585,6 +589,8 @@ function computeHorseStats(array $entries, array $horses): array
             $stats[$horseId]['avgSpeedTimeMs'] += $duration;
         }
         $stats[$horseId]['maxSpeedMps'] = max($stats[$horseId]['maxSpeedMps'], $maxSpeed);
+        $stats[$horseId]['longestDistanceM'] = max($stats[$horseId]['longestDistanceM'], $distance);
+        $stats[$horseId]['longestDurationMs'] = max($stats[$horseId]['longestDurationMs'], $duration);
         $stats[$horseId]['lastRideMs'] = max($stats[$horseId]['lastRideMs'], $end);
     }
 
@@ -595,6 +601,122 @@ function computeHorseStats(array $entries, array $horses): array
     }
 
     return $stats;
+}
+
+function collectRideSummaries(array $entries, array $horses): array
+{
+    $horseNames = [];
+    foreach ($horses as $horse) {
+        $horseNames[(string)$horse['id']] = (string)$horse['name'];
+    }
+
+    $rides = [];
+    foreach ($entries as $name => $data) {
+        if (!preg_match('/^rides\/.+\.meta\.json$/', (string)$name)) {
+            continue;
+        }
+        $meta = json_decode((string)$data, true);
+        if (!is_array($meta)) {
+            continue;
+        }
+
+        $horseId = (string)($meta['horseId'] ?? '');
+        $start = (int)($meta['startTimeMs'] ?? 0);
+        $end = (int)($meta['endTimeMs'] ?? $start);
+        if ($start <= 0 || $end <= 0) {
+            continue;
+        }
+
+        $rides[] = [
+            'horseId' => $horseId,
+            'horseName' => $horseNames[$horseId] ?? 'Neznamy kun',
+            'startTimeMs' => $start,
+            'endTimeMs' => $end,
+            'durationMs' => max(0, $end - $start),
+            'distanceM' => max(0.0, (float)($meta['distanceM'] ?? 0.0)),
+            'avgSpeedMps' => max(0.0, (float)($meta['avgSpeedMps'] ?? 0.0)),
+            'maxSpeedMps' => max(0.0, (float)($meta['maxSpeedMps'] ?? 0.0)),
+        ];
+    }
+
+    usort($rides, static function (array $a, array $b): int {
+        return (int)$b['startTimeMs'] <=> (int)$a['startTimeMs'];
+    });
+
+    return $rides;
+}
+
+function computeOverviewStats(array $rides): array
+{
+    $overview = [
+        'ridesCount' => count($rides),
+        'totalDurationMs' => 0,
+        'totalDistanceM' => 0.0,
+        'maxSpeedMps' => 0.0,
+        'lastRideMs' => 0,
+        'longestDistanceM' => 0.0,
+        'longestDurationMs' => 0,
+    ];
+
+    foreach ($rides as $ride) {
+        $duration = (int)$ride['durationMs'];
+        $distance = (float)$ride['distanceM'];
+        $overview['totalDurationMs'] += $duration;
+        $overview['totalDistanceM'] += $distance;
+        $overview['maxSpeedMps'] = max($overview['maxSpeedMps'], (float)$ride['maxSpeedMps']);
+        $overview['lastRideMs'] = max($overview['lastRideMs'], (int)$ride['endTimeMs']);
+        $overview['longestDistanceM'] = max($overview['longestDistanceM'], $distance);
+        $overview['longestDurationMs'] = max($overview['longestDurationMs'], $duration);
+    }
+
+    $durationS = max(1.0, $overview['totalDurationMs'] / 1000.0);
+    $overview['avgSpeedMps'] = $overview['totalDistanceM'] / $durationS;
+
+    return $overview;
+}
+
+function computeDailyActivity(array $rides, int $days): array
+{
+    if ($rides === []) {
+        return [];
+    }
+
+    $lastMs = 0;
+    foreach ($rides as $ride) {
+        $lastMs = max($lastMs, (int)$ride['startTimeMs']);
+    }
+
+    $lastDay = strtotime(date('Y-m-d 00:00:00', (int)floor($lastMs / 1000)));
+    if ($lastDay === false) {
+        return [];
+    }
+    $firstDay = strtotime('-' . max(0, $days - 1) . ' days', $lastDay);
+    if ($firstDay === false) {
+        return [];
+    }
+
+    $daily = [];
+    for ($time = $firstDay; $time <= $lastDay; $time += 86400) {
+        $key = date('Y-m-d', $time);
+        $daily[$key] = [
+            'label' => date('j.n.', $time),
+            'ridesCount' => 0,
+            'distanceM' => 0.0,
+            'durationMs' => 0,
+        ];
+    }
+
+    foreach ($rides as $ride) {
+        $day = date('Y-m-d', (int)floor((int)$ride['startTimeMs'] / 1000));
+        if (!isset($daily[$day])) {
+            continue;
+        }
+        $daily[$day]['ridesCount']++;
+        $daily[$day]['distanceM'] += (float)$ride['distanceM'];
+        $daily[$day]['durationMs'] += (int)$ride['durationMs'];
+    }
+
+    return array_values($daily);
 }
 
 function formatDurationMs(int $ms): string
@@ -687,12 +809,18 @@ function renderImportPage(string $backupFile, string $requestToken, string $mess
     $horses = [];
     $ridesCount = 0;
     $stats = [];
+    $rides = [];
+    $overview = computeOverviewStats([]);
+    $dailyActivity = [];
     $loadError = '';
     try {
         $entries = loadBackupEntries($backupFile);
         ensureBackupDefaults($entries);
         $horses = readHorses($entries);
         $stats = computeHorseStats($entries, $horses);
+        $rides = collectRideSummaries($entries, $horses);
+        $overview = computeOverviewStats($rides);
+        $dailyActivity = computeDailyActivity($rides, 14);
         foreach ($entries as $name => $_) {
             if (preg_match('/^rides\/.+\.meta\.json$/', (string)$name)) {
                 $ridesCount++;
@@ -715,7 +843,10 @@ function renderImportPage(string $backupFile, string $requestToken, string $mess
     }
 
     echo '<p class="muted">V backupu je ' . count($horses) . ' koni a ' . $ridesCount . ' jizd. Po importu v Android aplikaci spust Obnovit z cloudu.</p>';
+    renderOverviewSection(count($horses), $overview);
     renderStatsSection($horses, $stats);
+    renderChartsSection($horses, $stats, $dailyActivity);
+    renderRecentRidesSection($rides);
     echo '<form method="post" enctype="multipart/form-data">';
     echo '<input type="hidden" name="token" value="' . htmlspecialchars($requestToken, ENT_QUOTES, 'UTF-8') . '">';
     echo '<label>Kun<select name="horseId">';
@@ -730,6 +861,20 @@ function renderImportPage(string $backupFile, string $requestToken, string $mess
     echo '<p><a href="?download=1&amp;token=' . rawurlencode($requestToken) . '">Stahnout aktualni backup ZIP</a></p>';
     echo '</main></body></html>';
     exit;
+}
+
+function renderOverviewSection(int $horsesCount, array $overview): void
+{
+    echo '<section class="overview" aria-label="Souhrn">';
+    echo '<div class="overview-card"><span>Kone</span><strong>' . $horsesCount . '</strong></div>';
+    echo '<div class="overview-card"><span>Jizdy</span><strong>' . (int)$overview['ridesCount'] . '</strong></div>';
+    echo '<div class="overview-card"><span>Vzdalenost</span><strong>' . formatDistanceKm((float)$overview['totalDistanceM']) . '</strong></div>';
+    echo '<div class="overview-card"><span>Cas</span><strong>' . htmlspecialchars(formatDurationMs((int)$overview['totalDurationMs']), ENT_QUOTES, 'UTF-8') . '</strong></div>';
+    echo '<div class="overview-card"><span>Prumer</span><strong>' . formatSpeedKmh((float)$overview['avgSpeedMps']) . '</strong></div>';
+    echo '<div class="overview-card"><span>Maximum</span><strong>' . formatSpeedKmh((float)$overview['maxSpeedMps']) . '</strong></div>';
+    echo '<div class="overview-card"><span>Nejdelsi trasa</span><strong>' . formatDistanceKm((float)$overview['longestDistanceM']) . '</strong></div>';
+    echo '<div class="overview-card"><span>Posledni</span><strong>' . htmlspecialchars(formatDateTimeMs((int)$overview['lastRideMs']), ENT_QUOTES, 'UTF-8') . '</strong></div>';
+    echo '</section>';
 }
 
 function renderStatsSection(array $horses, array $stats): void
@@ -749,6 +894,8 @@ function renderStatsSection(array $horses, array $stats): void
             'totalDistanceM' => 0.0,
             'avgSpeedMps' => 0.0,
             'maxSpeedMps' => 0.0,
+            'longestDistanceM' => 0.0,
+            'longestDurationMs' => 0,
             'lastRideMs' => 0,
         ];
         echo '<article class="horse-stat">';
@@ -759,10 +906,137 @@ function renderStatsSection(array $horses, array $stats): void
         echo '<div><dt>Vzdalenost</dt><dd>' . number_format((float)$row['totalDistanceM'] / 1000.0, 1, ',', ' ') . ' km</dd></div>';
         echo '<div><dt>Prumer</dt><dd>' . number_format((float)$row['avgSpeedMps'] * 3.6, 1, ',', ' ') . ' km/h</dd></div>';
         echo '<div><dt>Maximum</dt><dd>' . number_format((float)$row['maxSpeedMps'] * 3.6, 1, ',', ' ') . ' km/h</dd></div>';
+        echo '<div><dt>Nejdelsi</dt><dd>' . formatDistanceKm((float)$row['longestDistanceM']) . '</dd></div>';
         echo '<div><dt>Posledni</dt><dd>' . htmlspecialchars(formatDateTimeMs((int)$row['lastRideMs']), ENT_QUOTES, 'UTF-8') . '</dd></div>';
         echo '</dl></article>';
     }
     echo '</div></section>';
+}
+
+function renderChartsSection(array $horses, array $stats, array $dailyActivity): void
+{
+    if ($horses === [] && $dailyActivity === []) {
+        return;
+    }
+
+    $maxDistance = 0.0;
+    $maxRides = 0;
+    foreach ($horses as $horse) {
+        $row = $stats[(string)$horse['id']] ?? [];
+        $maxDistance = max($maxDistance, (float)($row['totalDistanceM'] ?? 0.0));
+        $maxRides = max($maxRides, (int)($row['ridesCount'] ?? 0));
+    }
+
+    echo '<section class="charts"><h3>Grafy</h3><div class="chart-grid">';
+    renderHorseBarChart('Vzdalenost podle kone', $horses, $stats, 'totalDistanceM', $maxDistance, static function (float $value): string {
+        return formatDistanceKm($value);
+    });
+    renderHorseBarChart('Pocet jizd podle kone', $horses, $stats, 'ridesCount', (float)$maxRides, static function (float $value): string {
+        return (string)(int)$value;
+    });
+    echo '</div>';
+
+    renderDailyActivityChart($dailyActivity);
+    echo '</section>';
+}
+
+function renderHorseBarChart(string $title, array $horses, array $stats, string $field, float $maxValue, callable $formatter): void
+{
+    echo '<article class="chart-panel"><h4>' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '</h4>';
+    if ($horses === []) {
+        echo '<p class="muted">Zatim nejsou data pro graf.</p></article>';
+        return;
+    }
+
+    $sortedHorses = $horses;
+    usort($sortedHorses, static function (array $a, array $b) use ($stats, $field): int {
+        $aValue = (float)($stats[(string)$a['id']][$field] ?? 0.0);
+        $bValue = (float)($stats[(string)$b['id']][$field] ?? 0.0);
+        if ($aValue === $bValue) {
+            return strnatcasecmp((string)$a['name'], (string)$b['name']);
+        }
+        return $bValue <=> $aValue;
+    });
+
+    echo '<div class="bar-chart">';
+    foreach ($sortedHorses as $horse) {
+        $row = $stats[(string)$horse['id']] ?? [];
+        $value = (float)($row[$field] ?? 0.0);
+        $percent = $maxValue > 0.0 ? max(2.0, min(100.0, ($value / $maxValue) * 100.0)) : 0.0;
+        echo '<div class="bar-row">';
+        echo '<span class="bar-label">' . htmlspecialchars((string)$horse['name'], ENT_QUOTES, 'UTF-8') . '</span>';
+        echo '<span class="bar-track"><span class="bar-fill" style="width:' . chartPercent($percent) . '%"></span></span>';
+        echo '<strong>' . htmlspecialchars($formatter($value), ENT_QUOTES, 'UTF-8') . '</strong>';
+        echo '</div>';
+    }
+    echo '</div></article>';
+}
+
+function renderDailyActivityChart(array $dailyActivity): void
+{
+    if ($dailyActivity === []) {
+        return;
+    }
+
+    $maxDistance = 0.0;
+    foreach ($dailyActivity as $day) {
+        $maxDistance = max($maxDistance, (float)$day['distanceM']);
+    }
+
+    echo '<article class="activity-panel"><h4>Aktivita po dnech</h4><div class="day-chart">';
+    foreach ($dailyActivity as $day) {
+        $distance = (float)$day['distanceM'];
+        $percent = $maxDistance > 0.0 && $distance > 0.0 ? max(8.0, min(100.0, ($distance / $maxDistance) * 100.0)) : 0.0;
+        $title =
+            (string)$day['label'] . ': ' .
+            (int)$day['ridesCount'] . ' jizd, ' .
+            formatDistanceKm($distance) . ', ' .
+            formatDurationMs((int)$day['durationMs']);
+        echo '<div class="day-column" title="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '">';
+        echo '<span class="day-bar-wrap"><span class="day-bar" style="height:' . chartPercent($percent) . '%"></span></span>';
+        echo '<span class="day-label">' . htmlspecialchars((string)$day['label'], ENT_QUOTES, 'UTF-8') . '</span>';
+        echo '</div>';
+    }
+    echo '</div></article>';
+}
+
+function renderRecentRidesSection(array $rides): void
+{
+    echo '<section class="recent-rides"><h3>Posledni jizdy</h3>';
+    if ($rides === []) {
+        echo '<p class="muted">Zatim tu nejsou zadne jizdy.</p></section>';
+        return;
+    }
+
+    echo '<div class="table-wrap"><table><thead><tr>';
+    echo '<th>Datum</th><th>Kun</th><th>Vzdalenost</th><th>Cas</th><th>Prumer</th><th>Maximum</th>';
+    echo '</tr></thead><tbody>';
+    foreach (array_slice($rides, 0, 8) as $ride) {
+        echo '<tr>';
+        echo '<td>' . htmlspecialchars(formatDateTimeMs((int)$ride['startTimeMs']), ENT_QUOTES, 'UTF-8') . '</td>';
+        echo '<td>' . htmlspecialchars((string)$ride['horseName'], ENT_QUOTES, 'UTF-8') . '</td>';
+        echo '<td>' . formatDistanceKm((float)$ride['distanceM']) . '</td>';
+        echo '<td>' . htmlspecialchars(formatDurationMs((int)$ride['durationMs']), ENT_QUOTES, 'UTF-8') . '</td>';
+        echo '<td>' . formatSpeedKmh((float)$ride['avgSpeedMps']) . '</td>';
+        echo '<td>' . formatSpeedKmh((float)$ride['maxSpeedMps']) . '</td>';
+        echo '</tr>';
+    }
+    echo '</tbody></table></div></section>';
+}
+
+function formatDistanceKm(float $meters): string
+{
+    return number_format($meters / 1000.0, 1, ',', ' ') . ' km';
+}
+
+function formatSpeedKmh(float $metersPerSecond): string
+{
+    return number_format($metersPerSecond * 3.6, 1, ',', ' ') . ' km/h';
+}
+
+function chartPercent(float $value): string
+{
+    return number_format(max(0.0, min(100.0, $value)), 2, '.', '');
 }
 
 function pageStyles(): string
@@ -770,7 +1044,7 @@ function pageStyles(): string
     return '<style>
         :root{color-scheme:light;font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#17212b;background:#f4f6f8}
         body{margin:0;padding:24px}
-        main{max-width:860px;margin:0 auto;background:#fff;border:1px solid #d8e0e8;border-radius:8px;padding:24px;box-shadow:0 10px 30px rgba(23,33,43,.08)}
+        main{max-width:1080px;margin:0 auto;background:#fff;border:1px solid #d8e0e8;border-radius:8px;padding:24px;box-shadow:0 10px 30px rgba(23,33,43,.08)}
         h1{margin:0 0 4px;font-size:28px}
         h2{margin:0 0 20px;font-size:18px;font-weight:600;color:#3c4b57}
         h3{margin:24px 0 12px;font-size:18px}
@@ -779,6 +1053,10 @@ function pageStyles(): string
         label{display:grid;gap:6px;font-weight:600}
         input,select{font:inherit;padding:10px;border:1px solid #b8c4ce;border-radius:6px;background:#fff}
         button{font:inherit;font-weight:700;padding:11px 14px;border:0;border-radius:6px;background:#1769aa;color:#fff}
+        .overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:18px 0 24px}
+        .overview-card{border:1px solid #d8e0e8;border-radius:8px;background:#fbfcfd;padding:12px}
+        .overview-card span{display:block;color:#5c6b76;font-size:13px}
+        .overview-card strong{display:block;margin-top:4px;font-size:19px;line-height:1.2}
         .stats{margin:20px 0 24px}
         .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
         .horse-stat{border:1px solid #d8e0e8;border-radius:8px;padding:14px;background:#fbfcfd}
@@ -787,10 +1065,39 @@ function pageStyles(): string
         dl div:first-child{border-top:0;padding-top:0}
         dt{color:#5c6b76}
         dd{margin:0;font-weight:700;text-align:right}
+        .charts{margin:20px 0 24px}
+        .chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+        .chart-panel,.activity-panel{border:1px solid #d8e0e8;border-radius:8px;background:#fbfcfd;padding:14px}
+        .bar-chart{display:grid;gap:10px}
+        .bar-row{display:grid;grid-template-columns:minmax(74px,1fr) minmax(90px,2fr) auto;gap:10px;align-items:center}
+        .bar-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#344654}
+        .bar-track{height:12px;border-radius:999px;background:#e6edf3;overflow:hidden}
+        .bar-fill{display:block;height:100%;border-radius:999px;background:#1769aa}
+        .bar-row strong{font-size:14px;text-align:right;white-space:nowrap}
+        .activity-panel{margin-top:12px}
+        .day-chart{display:grid;grid-template-columns:repeat(14,minmax(30px,1fr));gap:8px;align-items:end;min-height:150px}
+        .day-column{display:grid;grid-template-rows:110px auto;gap:7px;align-items:end;min-width:0}
+        .day-bar-wrap{display:flex;align-items:end;height:110px;border-radius:6px;background:#e6edf3;overflow:hidden}
+        .day-bar{display:block;width:100%;border-radius:6px 6px 0 0;background:#2b8a5f}
+        .day-label{font-size:12px;color:#5c6b76;text-align:center;white-space:nowrap}
+        .recent-rides{margin:20px 0 24px}
+        .table-wrap{overflow-x:auto;border:1px solid #d8e0e8;border-radius:8px}
+        table{width:100%;border-collapse:collapse;background:#fbfcfd}
+        th,td{padding:10px 12px;border-bottom:1px solid #e6edf3;text-align:left;white-space:nowrap}
+        th{font-size:13px;color:#5c6b76;background:#f1f5f8}
+        tbody tr:last-child td{border-bottom:0}
         .muted{color:#5c6b76}
         .success{padding:10px 12px;border-radius:6px;background:#e5f6ec;color:#126b35}
         .error{padding:10px 12px;border-radius:6px;background:#fdecea;color:#9f1c14}
         a{color:#1769aa}
+        @media (max-width:700px){
+            body{padding:12px}
+            main{padding:16px}
+            .overview{grid-template-columns:repeat(2,minmax(0,1fr))}
+            .bar-row{grid-template-columns:1fr;gap:5px}
+            .bar-row strong{text-align:left}
+            .day-chart{grid-template-columns:repeat(7,minmax(28px,1fr));row-gap:14px}
+        }
     </style>';
 }
 
