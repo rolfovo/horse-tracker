@@ -12,6 +12,9 @@ $token = trim((string)($config['token'] ?? ''));
 $storageDir = (string)($config['storage_dir'] ?? (__DIR__ . '/data'));
 $maxUploadBytes = (int)($config['max_upload_bytes'] ?? (50 * 1024 * 1024));
 $maxGpxUploadBytes = (int)($config['max_gpx_upload_bytes'] ?? (10 * 1024 * 1024));
+$backupHistoryDir = (string)($config['backup_history_dir'] ?? (rtrim($storageDir, "/\\") . DIRECTORY_SEPARATOR . 'history'));
+$maxBackupVersions = (int)($config['max_backup_versions'] ?? 30);
+$rejectEmptyOverwrite = (bool)($config['reject_empty_overwrite'] ?? true);
 $backupFile = rtrim($storageDir, "/\\") . DIRECTORY_SEPARATOR . 'horse_tracker_backup.zip';
 
 if ($token === '' || $token === 'CHANGE_ME_TO_A_LONG_RANDOM_TOKEN') {
@@ -24,7 +27,7 @@ if ($method === 'GET' && wantsHtml() && !isset($_GET['download'])) {
     if (!isAuthorized($token)) {
         renderLoginPage();
     }
-    renderImportPage($backupFile, tokenFromRequest());
+    renderImportPage($backupFile, tokenFromRequest(), '', false, $backupHistoryDir);
 }
 
 if ($method === 'GET' && isset($_GET['download'])) {
@@ -34,17 +37,24 @@ if ($method === 'GET' && isset($_GET['download'])) {
     sendBackup($backupFile);
 }
 
+if ($method === 'GET' && isset($_GET['history'])) {
+    if (!isAuthorized($token)) {
+        renderLoginPage('Neplatny token.');
+    }
+    sendHistoryBackup($backupHistoryDir, (string)$_GET['history']);
+}
+
 if ($method === 'POST') {
     if (!isAuthorized($token)) {
         renderLoginPage('Neplatny token.');
     }
-    handleGpxImport($backupFile, tokenFromRequest(), $maxGpxUploadBytes);
+    handleGpxImport($backupFile, tokenFromRequest(), $maxGpxUploadBytes, $backupHistoryDir, $maxBackupVersions);
 }
 
 requireBearerToken($token);
 
 if ($method === 'PUT') {
-    saveBackup($backupFile, $maxUploadBytes);
+    saveBackup($backupFile, $maxUploadBytes, $backupHistoryDir, $maxBackupVersions, $rejectEmptyOverwrite);
     respond(200, 'OK');
 }
 
@@ -110,7 +120,13 @@ function wantsHtml(): bool
     return $accept === '' || stripos($accept, 'text/html') !== false;
 }
 
-function saveBackup(string $backupFile, int $maxUploadBytes): void
+function saveBackup(
+    string $backupFile,
+    int $maxUploadBytes,
+    string $backupHistoryDir,
+    int $maxBackupVersions,
+    bool $rejectEmptyOverwrite
+): void
 {
     $lengthHeader = $_SERVER['CONTENT_LENGTH'] ?? null;
     if ($lengthHeader !== null && (int)$lengthHeader > $maxUploadBytes) {
@@ -132,6 +148,14 @@ function saveBackup(string $backupFile, int $maxUploadBytes): void
     $input = fopen('php://input', 'rb');
     $output = fopen($tempFile, 'wb');
     if ($input === false || $output === false) {
+        if (is_resource($input)) {
+            fclose($input);
+        }
+        if (is_resource($output)) {
+            fclose($output);
+        }
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
         respond(500, 'Cannot open upload streams');
     }
 
@@ -140,11 +164,19 @@ function saveBackup(string $backupFile, int $maxUploadBytes): void
         $chunk = fread($input, 1024 * 1024);
         if ($chunk === false) {
             @unlink($tempFile);
+            fclose($input);
+            fclose($output);
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
             respond(500, 'Cannot read upload');
         }
         $bytes += strlen($chunk);
         if ($bytes > $maxUploadBytes) {
             @unlink($tempFile);
+            fclose($input);
+            fclose($output);
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
             respond(413, 'Backup is too large');
         }
         fwrite($output, $chunk);
@@ -155,11 +187,25 @@ function saveBackup(string $backupFile, int $maxUploadBytes): void
 
     if ($bytes === 0) {
         @unlink($tempFile);
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
         respond(400, 'Empty backup upload');
+    }
+
+    try {
+        guardUploadedBackup($tempFile, $backupFile, $rejectEmptyOverwrite);
+        snapshotExistingBackup($backupFile, $backupHistoryDir, $maxBackupVersions);
+    } catch (Throwable $e) {
+        @unlink($tempFile);
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+        respond(409, $e->getMessage());
     }
 
     if (!rename($tempFile, $backupFile)) {
         @unlink($tempFile);
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
         respond(500, 'Cannot save backup');
     }
 
@@ -181,7 +227,139 @@ function sendBackup(string $backupFile): void
     exit;
 }
 
-function handleGpxImport(string $backupFile, string $requestToken, int $maxGpxUploadBytes): void
+function sendHistoryBackup(string $backupHistoryDir, string $fileName): void
+{
+    $baseName = basename($fileName);
+    if ($baseName !== $fileName || !preg_match('/^horse_tracker_backup_\d{8}_\d{6}_[a-f0-9]{8}\.zip$/', $baseName)) {
+        respond(400, 'Invalid history backup name');
+    }
+
+    $historyFile = rtrim($backupHistoryDir, "/\\") . DIRECTORY_SEPARATOR . $baseName;
+    if (!is_file($historyFile)) {
+        respond(404, 'History backup not found');
+    }
+
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $baseName . '"');
+    header('Content-Length: ' . filesize($historyFile));
+    readfile($historyFile);
+    exit;
+}
+
+function guardUploadedBackup(string $uploadedFile, string $currentBackupFile, bool $rejectEmptyOverwrite): void
+{
+    if (!class_exists('ZipArchive')) {
+        throw new RuntimeException('Na serveru chybi PHP rozsireni ZipArchive.');
+    }
+
+    $incoming = summarizeBackupFile($uploadedFile);
+    if (!$incoming['hasMetadata']) {
+        throw new RuntimeException('Nahrany ZIP neni platny Horse Tracker backup.');
+    }
+
+    if (!$rejectEmptyOverwrite || !is_file($currentBackupFile)) {
+        return;
+    }
+
+    $current = summarizeBackupFile($currentBackupFile);
+    $currentHasData = $current['horsesCount'] > 0 || $current['ridesCount'] > 0;
+    $incomingIsEmpty = $incoming['horsesCount'] === 0 && $incoming['ridesCount'] === 0;
+    if ($currentHasData && $incomingIsEmpty) {
+        throw new RuntimeException(
+            'Odmitnuto: prazdny backup by prepsal cloud, kde uz jsou ' .
+            $current['horsesCount'] . ' kone a ' . $current['ridesCount'] . ' jizdy.'
+        );
+    }
+}
+
+function summarizeBackupFile(string $backupFile): array
+{
+    if (!is_file($backupFile)) {
+        return [
+            'hasMetadata' => false,
+            'horsesCount' => 0,
+            'ridesCount' => 0,
+            'bytes' => 0,
+        ];
+    }
+
+    $entries = loadBackupEntries($backupFile);
+    return summarizeBackupEntries($entries) + ['bytes' => filesize($backupFile)];
+}
+
+function summarizeBackupEntries(array $entries): array
+{
+    $ridesCount = 0;
+    foreach ($entries as $name => $_) {
+        if (preg_match('/^rides\/.+\.meta\.json$/', (string)$name)) {
+            $ridesCount++;
+        }
+    }
+
+    return [
+        'hasMetadata' => isset($entries['backup.json']),
+        'horsesCount' => count(readHorses($entries)),
+        'ridesCount' => $ridesCount,
+    ];
+}
+
+function snapshotExistingBackup(string $backupFile, string $backupHistoryDir, int $maxBackupVersions): void
+{
+    if ($maxBackupVersions <= 0 || !is_file($backupFile) || filesize($backupFile) <= 0) {
+        return;
+    }
+
+    if (!is_dir($backupHistoryDir) && !mkdir($backupHistoryDir, 0700, true) && !is_dir($backupHistoryDir)) {
+        throw new RuntimeException('Nelze vytvorit adresar historickych zaloh.');
+    }
+
+    $hash = @sha1_file($backupFile);
+    $hashPart = is_string($hash) ? substr($hash, 0, 8) : substr(bin2hex(random_bytes(4)), 0, 8);
+    $target =
+        rtrim($backupHistoryDir, "/\\") .
+        DIRECTORY_SEPARATOR .
+        'horse_tracker_backup_' .
+        gmdate('Ymd_His') .
+        '_' .
+        $hashPart .
+        '.zip';
+
+    if (!copy($backupFile, $target)) {
+        throw new RuntimeException('Nelze vytvorit historickou zalohu pred prepsanim.');
+    }
+    @chmod($target, 0600);
+    pruneBackupHistory($backupHistoryDir, $maxBackupVersions);
+}
+
+function listHistoryBackups(string $backupHistoryDir): array
+{
+    if (!is_dir($backupHistoryDir)) {
+        return [];
+    }
+
+    $files = glob(rtrim($backupHistoryDir, "/\\") . DIRECTORY_SEPARATOR . 'horse_tracker_backup_*.zip') ?: [];
+    usort($files, static function (string $a, string $b): int {
+        return filemtime($b) <=> filemtime($a);
+    });
+
+    return $files;
+}
+
+function pruneBackupHistory(string $backupHistoryDir, int $maxBackupVersions): void
+{
+    $files = listHistoryBackups($backupHistoryDir);
+    foreach (array_slice($files, $maxBackupVersions) as $oldFile) {
+        @unlink($oldFile);
+    }
+}
+
+function handleGpxImport(
+    string $backupFile,
+    string $requestToken,
+    int $maxGpxUploadBytes,
+    string $backupHistoryDir,
+    int $maxBackupVersions
+): void
 {
     try {
         if (!class_exists('ZipArchive')) {
@@ -240,15 +418,15 @@ function handleGpxImport(string $backupFile, string $requestToken, int $maxGpxUp
 
         $entries['rides/' . $gpxName] = $gpxBytes;
         $entries['rides/' . $metaName] = json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-        saveBackupEntries($backupFile, $entries);
+        saveBackupEntries($backupFile, $entries, $backupHistoryDir, $maxBackupVersions);
 
         $message =
             'Import hotov: ' . $horseName .
             ', ' . date('Y-m-d H:i', (int)floor($stats['startTimeMs'] / 1000)) .
             ', ' . number_format($stats['distanceM'] / 1000, 2, ',', ' ') . ' km.';
-        renderImportPage($backupFile, $requestToken, $message);
+        renderImportPage($backupFile, $requestToken, $message, false, $backupHistoryDir);
     } catch (Throwable $e) {
-        renderImportPage($backupFile, $requestToken, $e->getMessage(), true);
+        renderImportPage($backupFile, $requestToken, $e->getMessage(), true, $backupHistoryDir);
     }
 }
 
@@ -421,7 +599,7 @@ function loadBackupEntries(string $backupFile): array
     return $entries;
 }
 
-function saveBackupEntries(string $backupFile, array $entries): void
+function saveBackupEntries(string $backupFile, array $entries, string $backupHistoryDir, int $maxBackupVersions): void
 {
     $dir = dirname($backupFile);
     if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
@@ -452,16 +630,22 @@ function saveBackupEntries(string $backupFile, array $entries): void
     }
     $zip->close();
 
-    if (!rename($tempFile, $backupFile)) {
-        @unlink($tempFile);
+    try {
+        snapshotExistingBackup($backupFile, $backupHistoryDir, $maxBackupVersions);
+
+        if (!rename($tempFile, $backupFile)) {
+            @unlink($tempFile);
+            throw new RuntimeException('Nelze ulozit backup.');
+        }
+
+        @chmod($backupFile, 0600);
+    } finally {
+        if (is_file($tempFile)) {
+            @unlink($tempFile);
+        }
         flock($lockHandle, LOCK_UN);
         fclose($lockHandle);
-        throw new RuntimeException('Nelze ulozit backup.');
     }
-
-    @chmod($backupFile, 0600);
-    flock($lockHandle, LOCK_UN);
-    fclose($lockHandle);
 }
 
 function ensureBackupDefaults(array &$entries): void
@@ -803,7 +987,13 @@ function renderLoginPage(string $error = ''): void
     exit;
 }
 
-function renderImportPage(string $backupFile, string $requestToken, string $message = '', bool $isError = false): void
+function renderImportPage(
+    string $backupFile,
+    string $requestToken,
+    string $message = '',
+    bool $isError = false,
+    string $backupHistoryDir = ''
+): void
 {
     $entries = [];
     $horses = [];
@@ -847,6 +1037,7 @@ function renderImportPage(string $backupFile, string $requestToken, string $mess
     renderStatsSection($horses, $stats);
     renderChartsSection($horses, $stats, $dailyActivity);
     renderRecentRidesSection($rides);
+    renderBackupHistorySection($backupHistoryDir, $requestToken);
     echo '<form method="post" enctype="multipart/form-data">';
     echo '<input type="hidden" name="token" value="' . htmlspecialchars($requestToken, ENT_QUOTES, 'UTF-8') . '">';
     echo '<label>Kun<select name="horseId">';
@@ -875,6 +1066,33 @@ function renderOverviewSection(int $horsesCount, array $overview): void
     echo '<div class="overview-card"><span>Nejdelsi trasa</span><strong>' . formatDistanceKm((float)$overview['longestDistanceM']) . '</strong></div>';
     echo '<div class="overview-card"><span>Posledni</span><strong>' . htmlspecialchars(formatDateTimeMs((int)$overview['lastRideMs']), ENT_QUOTES, 'UTF-8') . '</strong></div>';
     echo '</section>';
+}
+
+function renderBackupHistorySection(string $backupHistoryDir, string $requestToken): void
+{
+    if ($backupHistoryDir === '') {
+        return;
+    }
+
+    $files = array_slice(listHistoryBackups($backupHistoryDir), 0, 10);
+    echo '<section class="history"><h3>Historicke zalohy</h3>';
+    if ($files === []) {
+        echo '<p class="muted">Zatim neni ulozena zadna starsi cloud zaloha.</p></section>';
+        return;
+    }
+
+    echo '<ul class="history-list">';
+    foreach ($files as $file) {
+        $baseName = basename($file);
+        $time = date('Y-m-d H:i:s', filemtime($file));
+        $size = number_format((float)filesize($file) / 1024.0, 1, ',', ' ');
+        echo '<li><a href="?history=' . rawurlencode($baseName) . '&amp;token=' . rawurlencode($requestToken) . '">' .
+            htmlspecialchars($time, ENT_QUOTES, 'UTF-8') .
+            '</a> <span class="muted">' .
+            htmlspecialchars($size, ENT_QUOTES, 'UTF-8') .
+            ' KB</span></li>';
+    }
+    echo '</ul></section>';
 }
 
 function renderStatsSection(array $horses, array $stats): void
@@ -1086,6 +1304,8 @@ function pageStyles(): string
         th,td{padding:10px 12px;border-bottom:1px solid #e6edf3;text-align:left;white-space:nowrap}
         th{font-size:13px;color:#5c6b76;background:#f1f5f8}
         tbody tr:last-child td{border-bottom:0}
+        .history{margin:20px 0 24px}
+        .history-list{display:grid;gap:7px;margin:0;padding-left:20px}
         .muted{color:#5c6b76}
         .success{padding:10px 12px;border-radius:6px;background:#e5f6ec;color:#126b35}
         .error{padding:10px 12px;border-radius:6px;background:#fdecea;color:#9f1c14}

@@ -12,29 +12,15 @@ The app uses:
 
 1. Upload this whole folder to your web hosting, for example:
 
-   `https://zernovka.cz/horse-tracker-cloud/`
+   `https://zahradnice.cz/horse-tracker-cloud/`
 
 2. On the server, copy:
 
    `config.example.php` -> `config.php`
 
-3. Edit `config.php` and replace:
+3. Edit `config.php` and set the same token as in the Android app.
 
-   `CHANGE_ME_TO_A_LONG_RANDOM_TOKEN`
-
-   with a long secret token.
-
-   Token generator on Linux/macOS:
-
-   ```sh
-   openssl rand -hex 32
-   ```
-
-   Token generator in PowerShell:
-
-   ```powershell
-   -join ((48..57 + 65..90 + 97..122) | Get-Random -Count 64 | ForEach-Object {[char]$_})
-   ```
+   Current configured token in the example is `asdf`.
 
 4. Make sure PHP can write into the `data` directory.
 
@@ -51,13 +37,13 @@ In the Android app fill:
 Cloud API URL:
 
 ```text
-https://zernovka.cz/horse-tracker-cloud/
+https://zahradnice.cz/horse-tracker-cloud/
 ```
 
 Bearer token:
 
 ```text
-the token from config.php
+asdf
 ```
 
 Then turn `Sync ON` and tap `Ulozit`.
@@ -67,7 +53,7 @@ Then turn `Sync ON` and tap `Ulozit`.
 Open the same Cloud API URL in Safari or Chrome on iPhone:
 
 ```text
-https://zernovka.cz/horse-tracker-cloud/
+https://zahradnice.cz/horse-tracker-cloud/
 ```
 
 Enter the bearer token, choose the horse, pick a `.gpx` file, and submit the form.
@@ -88,19 +74,19 @@ Create a tiny test ZIP first, then upload it:
 
 ```sh
 curl -i -X PUT \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer asdf" \
   -H "Content-Type: application/zip" \
   --data-binary @test.zip \
-  https://zernovka.cz/horse-tracker-cloud/
+  https://zahradnice.cz/horse-tracker-cloud/
 ```
 
 Download it back:
 
 ```sh
 curl -i \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer asdf" \
   -o restored.zip \
-  https://zernovka.cz/horse-tracker-cloud/
+  https://zahradnice.cz/horse-tracker-cloud/
 ```
 
 Expected results:
@@ -112,4 +98,6 @@ Expected results:
 
 - Use HTTPS.
 - Keep `config.php` private.
+- Before every overwrite, the server copies the previous ZIP into `data/history`.
+- A PUT upload that would replace a non-empty cloud backup with an empty backup is rejected by default.
 - If your server runs Nginx instead of Apache, `.htaccess` files are ignored. In that case, place `storage_dir` outside the public web root when possible.

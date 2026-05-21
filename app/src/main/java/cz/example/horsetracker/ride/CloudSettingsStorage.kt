@@ -7,10 +7,12 @@ object CloudSettingsStorage {
     private const val KEY_ENDPOINT_URL = "endpoint_url"
     private const val KEY_TOKEN = "token"
     private const val KEY_ENABLED = "enabled"
+    private const val DEFAULT_ENDPOINT_URL = "https://zahradnice.cz/horse-tracker-cloud/"
+    private const val DEFAULT_TOKEN = "asdf"
 
     data class CloudSettings(
-        val endpointUrl: String = "",
-        val token: String = "",
+        val endpointUrl: String = DEFAULT_ENDPOINT_URL,
+        val token: String = DEFAULT_TOKEN,
         val enabled: Boolean = false,
     ) {
         val isConfigured: Boolean
@@ -20,8 +22,8 @@ object CloudSettingsStorage {
     fun load(context: Context): CloudSettings {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         return CloudSettings(
-            endpointUrl = prefs.getString(KEY_ENDPOINT_URL, "").orEmpty(),
-            token = prefs.getString(KEY_TOKEN, "").orEmpty(),
+            endpointUrl = prefs.getString(KEY_ENDPOINT_URL, null).defaultIfBlank(DEFAULT_ENDPOINT_URL),
+            token = prefs.getString(KEY_TOKEN, null).defaultIfBlank(DEFAULT_TOKEN),
             enabled = prefs.getBoolean(KEY_ENABLED, false),
         )
     }
@@ -34,4 +36,7 @@ object CloudSettingsStorage {
             .putBoolean(KEY_ENABLED, settings.enabled)
             .apply()
     }
+
+    private fun String?.defaultIfBlank(defaultValue: String): String =
+        this?.takeIf { it.isNotBlank() } ?: defaultValue
 }

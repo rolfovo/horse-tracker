@@ -24,6 +24,20 @@ object AppBackupStorage {
         val backOnRouteThresholdM: Double,
     )
 
+    data class BackupSummary(
+        val horsesCount: Int,
+        val ridesCount: Int,
+    ) {
+        val isEmpty: Boolean
+            get() = horsesCount == 0 && ridesCount == 0
+    }
+
+    fun summary(context: Context): BackupSummary =
+        BackupSummary(
+            horsesCount = HorseStorage.listHorses(context).size,
+            ridesCount = RideMetaStorage.listMetas(context).size,
+        )
+
     fun export(context: Context, destinationUri: Uri) {
         val (warnM, backM) = FollowSettingsStorage.load(context)
         val metadata =

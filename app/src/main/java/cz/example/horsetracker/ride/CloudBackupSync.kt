@@ -9,6 +9,9 @@ object CloudBackupSync {
     fun upload(context: Context, settings: CloudSettingsStorage.CloudSettings) {
         require(settings.endpointUrl.isNotBlank()) { "Cloud URL is empty" }
 
+        val summary = AppBackupStorage.summary(context)
+        check(!summary.isEmpty) { "Cloud upload blocked: local backup has no horses or rides." }
+
         val temp = File(context.cacheDir, "horse_tracker_cloud_backup.zip")
         var connection: HttpURLConnection? = null
         try {
@@ -16,6 +19,8 @@ object CloudBackupSync {
             val activeConnection = openConnection(settings, method = "PUT", followRedirects = false).apply {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/zip")
+                setRequestProperty("X-Horse-Tracker-Horses", summary.horsesCount.toString())
+                setRequestProperty("X-Horse-Tracker-Rides", summary.ridesCount.toString())
                 setFixedLengthStreamingMode(temp.length())
             }
             connection = activeConnection
