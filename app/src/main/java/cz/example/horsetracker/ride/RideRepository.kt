@@ -1,6 +1,5 @@
 package cz.example.horsetracker.ride
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
@@ -14,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -42,82 +42,97 @@ object RideRepository {
     private val cloudSyncLock = Any()
     private var cloudSyncRunning = false
     private var cloudSyncRequested = false
+    private val draftIoLock = Any()
+    private var draftGeneration = 0L
 
     fun init(context: Context) {
-        appContext = context.applicationContext
+        val app = context.applicationContext
+        appContext = app
         _state.value = _state.value.copy(isLoadingData = true)
         ioScope.launch {
-            val horses = HorseStorage.listHorses(context)
-            val selected = SelectionStorage.getSelectedHorseId(context)
-            val stats = computeStats(context, horses)
-            val rides = listRidesInternal(context, selected)
-            val (warnM, backM) = FollowSettingsStorage.load(context)
-            val cloud = CloudSettingsStorage.load(context)
-            val baseState =
-                _state.value.copy(
-                    isLoadingData = false,
-                    horses = horses,
-                    selectedHorseId = selected,
-                    horseStats = stats,
-                    rides = rides,
-                    offRouteWarnThresholdM = warnM,
-                    backOnRouteThresholdM = backM,
-                    cloudEndpointUrl = cloud.endpointUrl,
-                    cloudToken = cloud.token,
-                    cloudSyncEnabled = cloud.enabled,
-                )
-            val restored = restoreDraftIfAvailable(context, baseState)
-            _state.value = restored
-            if (restored.points.isNotEmpty()) {
-                _events.tryEmit(UiEvent.Message("Byla obnovena nedokončená jízda po pádu nebo zavření aplikace."))
+            try {
+                val horses = HorseStorage.listHorses(app)
+                val selected = SelectionStorage.getSelectedHorseId(app)
+                val stats = computeStats(app, horses)
+                val rides = listRidesInternal(app, selected)
+                val (warnM, backM) = FollowSettingsStorage.load(app)
+                val cloud = CloudSettingsStorage.load(app)
+                val baseState =
+                    _state.value.copy(
+                        isLoadingData = false,
+                        horses = horses,
+                        selectedHorseId = selected,
+                        horseStats = stats,
+                        rides = rides,
+                        offRouteWarnThresholdM = warnM,
+                        backOnRouteThresholdM = backM,
+                        cloudEndpointUrl = cloud.endpointUrl,
+                        cloudToken = cloud.token,
+                        cloudSyncEnabled = cloud.enabled,
+                    )
+                val restored = restoreDraftIfAvailable(app, baseState)
+                _state.value = restored
+                if (restored.points.isNotEmpty()) {
+                    _events.tryEmit(UiEvent.Message("Byla obnovena nedokončená jízda po pádu nebo zavření aplikace."))
+                }
+            } catch (t: Throwable) {
+                _state.value = _state.value.copy(isLoadingData = false)
+                _events.tryEmit(UiEvent.Message("Načtení dat selhalo: ${errorText(t)}"))
             }
         }
     }
 
     fun selectHorse(context: Context, horseId: String) {
-        SelectionStorage.setSelectedHorseId(context, horseId)
+        val app = context.applicationContext
+        SelectionStorage.setSelectedHorseId(app, horseId)
         clearDisplayedRide()
         _state.value = _state.value.copy(selectedHorseId = horseId)
-        refreshRides(context)
-        refreshStats(context)
-        scheduleCloudUpload(context)
+        refreshRides(app)
+        refreshStats(app)
+        scheduleCloudUpload(app)
     }
 
     fun addHorse(context: Context, name: String) {
+        val app = context.applicationContext
         ioScope.launch {
-            val horse = HorseStorage.addHorse(context, name)
-            val horses = HorseStorage.listHorses(context)
-            val stats = computeStats(context, horses)
-            _state.value = _state.value.copy(horses = horses, selectedHorseId = horse.id, horseStats = stats)
-            SelectionStorage.setSelectedHorseId(context, horse.id)
-            refreshRides(context)
-            scheduleCloudUpload(context)
+            try {
+                val horse = HorseStorage.addHorse(app, name)
+                val horses = HorseStorage.listHorses(app)
+                val stats = computeStats(app, horses)
+                _state.value = _state.value.copy(horses = horses, selectedHorseId = horse.id, horseStats = stats)
+                SelectionStorage.setSelectedHorseId(app, horse.id)
+                refreshRides(app)
+                scheduleCloudUpload(app)
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Přidání koně selhalo: ${errorText(t)}"))
+            }
         }
     }
 
     fun deleteHorse(context: Context, horseId: String) {
+        val app = context.applicationContext
         ioScope.launch {
             try {
-                val deleted = HorseStorage.deleteHorse(context, horseId)
+                val deleted = HorseStorage.deleteHorse(app, horseId)
                 if (!deleted) {
                     _events.tryEmit(UiEvent.Message("Kůň nebyl nalezen."))
                     return@launch
                 }
 
-                val ridesDir = File(context.filesDir, "rides")
-                RideMetaStorage.listMetas(context)
+                val ridesDir = File(app.filesDir, "rides")
+                RideMetaStorage.listMetas(app)
                     .filter { it.horseId == horseId }
                     .forEach { meta ->
                         File(ridesDir, meta.gpxFileName).delete()
                         File(ridesDir, meta.metaFileName).delete()
                     }
 
-                val horses = HorseStorage.listHorses(context)
+                val horses = HorseStorage.listHorses(app)
                 val nextSelected = horses.firstOrNull()?.id
-                SelectionStorage.setSelectedHorseId(context, nextSelected)
+                SelectionStorage.setSelectedHorseId(app, nextSelected)
 
-                val stats = computeStats(context, horses)
-                val rides = listRidesInternal(context, nextSelected)
+                val stats = computeStats(app, horses)
+                val rides = listRidesInternal(app, nextSelected)
                 _state.value =
                     _state.value.copy(
                         horses = horses,
@@ -127,9 +142,9 @@ object RideRepository {
                     )
 
                 _events.tryEmit(UiEvent.Message("Kůň smazán včetně jeho jízd."))
-                scheduleCloudUpload(context)
+                scheduleCloudUpload(app)
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Mazání koně selhalo: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Mazání koně selhalo: ${errorText(t)}"))
             }
         }
     }
@@ -346,12 +361,13 @@ object RideRepository {
     }
 
     fun saveCurrentRide(context: Context) {
+        val app = context.applicationContext
         val current = _state.value
         val horseId = current.selectedHorseId ?: return
         if (current.points.isEmpty()) return
 
         ioScope.launch {
-            saveRideSnapshot(context, current, horseId)
+            saveRideSnapshot(app, current, horseId)
         }
     }
 
@@ -364,6 +380,7 @@ object RideRepository {
     }
 
     fun saveCurrentRideForHorseName(context: Context, horseName: String) {
+        val app = context.applicationContext
         val trimmed = horseName.trim()
         if (trimmed.isEmpty()) {
             _events.tryEmit(UiEvent.Message("Zadej jméno koně."))
@@ -377,18 +394,19 @@ object RideRepository {
 
         ioScope.launch {
             try {
-                val horse = HorseStorage.addHorse(context, trimmed)
-                SelectionStorage.setSelectedHorseId(context, horse.id)
-                val horses = HorseStorage.listHorses(context)
+                val horse = HorseStorage.addHorse(app, trimmed)
+                SelectionStorage.setSelectedHorseId(app, horse.id)
+                val horses = HorseStorage.listHorses(app)
                 _state.value = _state.value.copy(horses = horses, selectedHorseId = horse.id)
-                saveRideSnapshot(context, current, horse.id)
+                saveRideSnapshot(app, current, horse.id)
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Uložení selhalo: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Uložení selhalo: ${errorText(t)}"))
             }
         }
     }
 
     fun prefetchOfflineAroundCurrent(context: Context, radiusKm: Double = 4.0) {
+        val app = context.applicationContext
         val snapshot = _state.value
         val lat = snapshot.mapState.userLat
         val lon = snapshot.mapState.userLon
@@ -400,117 +418,126 @@ object RideRepository {
         ioScope.launch {
             try {
                 _events.tryEmit(UiEvent.Message("Stahuju offline mapu okolí (${radiusKm.toInt()} km)..."))
-                val result = OfflineTilePrefetcher.prefetchAround(context, lat, lon, radiusKm = radiusKm)
+                val result = OfflineTilePrefetcher.prefetchAround(app, lat, lon, radiusKm = radiusKm)
                 _events.tryEmit(
                     UiEvent.Message(
                         "Offline mapy hotovo: staženo ${result.downloaded}, v cache ${result.skipped}, chyby ${result.failed}.",
                     ),
                 )
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Offline stahování selhalo: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Offline stahování selhalo: ${errorText(t)}"))
             }
         }
     }
 
     fun loadMostRecentRide(context: Context) {
+        val app = context.applicationContext
         val current = _state.value
         val horseId = current.selectedHorseId
         ioScope.launch {
             val meta =
-                RideMetaStorage.listMetas(context)
+                RideMetaStorage.listMetas(app)
                     .filter { horseId == null || it.horseId == horseId }
                     .maxByOrNull { it.endTimeMs }
                     ?: return@launch
-            loadRide(context, meta.metaFileName)
+            loadRide(app, meta.metaFileName)
         }
     }
 
     fun refreshRides(context: Context, horseId: String? = _state.value.selectedHorseId) {
+        val app = context.applicationContext
         ioScope.launch {
-            val rides = listRidesInternal(context, horseId)
+            val rides = listRidesInternal(app, horseId)
             _state.value = _state.value.copy(rides = rides)
         }
     }
 
     fun loadRide(context: Context, metaFileName: String) {
+        val app = context.applicationContext
         ioScope.launch {
-            val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName } ?: return@launch
-            val ridesDir = File(context.filesDir, "rides")
-            val gpxFile = File(ridesDir, meta.gpxFileName)
-            if (!gpxFile.exists()) return@launch
+            try {
+                val meta = RideMetaStorage.listMetas(app).firstOrNull { it.metaFileName == metaFileName } ?: return@launch
+                val ridesDir = File(app.filesDir, "rides")
+                val gpxFile = File(ridesDir, meta.gpxFileName)
+                if (!gpxFile.exists()) return@launch
 
-            val ride = GpxStorage.readGpx(gpxFile)
-            val prev = _state.value
-            val next =
-                prev.copy(
-                    isAutoCenter = false,
-                    points = emptyList(),
-                    rideWaypoints = emptyList(),
-                    routeWaypoints = ride.waypoints,
-                    routeToFollow = ride.points.map { it.lat to it.lon },
-                    routeFollowSegments = buildSegments(ride.points),
-                    lastSpeedMps = 0.0,
-                    lastAccuracyM = 0.0,
-                    lastHeadingDeg = null,
-                    currentDistanceM = 0.0,
-                    currentDurationMs = 0L,
-                    currentAvgSpeedMps = 0.0,
-                    offRouteMeters = 0.0,
-                    mapState =
-                        prev.mapState.copy(
-                            userHeadingDeg = null,
-                            snapLat = null,
-                            snapLon = null,
-                            segments = emptyList(),
-                        ),
-                )
-            _state.value =
-                next.copy(
-                    mapState =
-                        next.mapState.copy(
-                            waypoints = next.waypoints,
-                            followRoute = effectiveFollowRoute(next),
-                            followSegments = effectiveFollowSegments(next),
-                            followActive = next.isFollowing,
-                        ),
-                )
+                val ride = GpxStorage.readGpx(gpxFile)
+                val prev = _state.value
+                val next =
+                    prev.copy(
+                        isAutoCenter = false,
+                        points = emptyList(),
+                        rideWaypoints = emptyList(),
+                        routeWaypoints = ride.waypoints,
+                        routeToFollow = ride.points.map { it.lat to it.lon },
+                        routeFollowSegments = buildSegments(ride.points),
+                        lastSpeedMps = 0.0,
+                        lastAccuracyM = 0.0,
+                        lastHeadingDeg = null,
+                        currentDistanceM = 0.0,
+                        currentDurationMs = 0L,
+                        currentAvgSpeedMps = 0.0,
+                        offRouteMeters = 0.0,
+                        mapState =
+                            prev.mapState.copy(
+                                userHeadingDeg = null,
+                                snapLat = null,
+                                snapLon = null,
+                                segments = emptyList(),
+                            ),
+                    )
+                _state.value =
+                    next.copy(
+                        mapState =
+                            next.mapState.copy(
+                                waypoints = next.waypoints,
+                                followRoute = effectiveFollowRoute(next),
+                                followSegments = effectiveFollowSegments(next),
+                                followActive = next.isFollowing,
+                            ),
+                    )
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Načtení jízdy selhalo: ${errorText(t)}"))
+            }
         }
     }
 
     fun deleteRide(context: Context, metaFileName: String, horseIdFilter: String? = _state.value.selectedHorseId) {
+        val app = context.applicationContext
         ioScope.launch {
             try {
-                val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName } ?: return@launch
-                val ridesDir = File(context.filesDir, "rides")
+                val meta = RideMetaStorage.listMetas(app).firstOrNull { it.metaFileName == metaFileName } ?: return@launch
+                val ridesDir = File(app.filesDir, "rides")
                 File(ridesDir, meta.gpxFileName).delete()
                 File(ridesDir, meta.metaFileName).delete()
-                refreshStats(context)
-                refreshRides(context, horseIdFilter)
-                scheduleCloudUpload(context)
+                refreshStats(app)
+                refreshRides(app, horseIdFilter)
+                scheduleCloudUpload(app)
                 _events.tryEmit(UiEvent.Message("Jízda smazána."))
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Mazání selhalo: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Mazání selhalo: ${errorText(t)}"))
             }
         }
     }
 
     fun exportRideToUri(context: Context, metaFileName: String, destinationUri: Uri) {
+        val app = context.applicationContext
         ioScope.launch {
             try {
-                val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName }
+                val meta = RideMetaStorage.listMetas(app).firstOrNull { it.metaFileName == metaFileName }
                 if (meta == null) {
                     _events.tryEmit(UiEvent.Message("Export selhal: jízda nebyla nalezena."))
                     return@launch
                 }
 
-                val sourceFile = File(File(context.filesDir, "rides"), meta.gpxFileName)
+                val sourceFile = File(File(app.filesDir, "rides"), meta.gpxFileName)
                 if (!sourceFile.exists()) {
                     _events.tryEmit(UiEvent.Message("Export selhal: GPX soubor neexistuje."))
                     return@launch
                 }
 
                 val output =
-                    context.contentResolver.openOutputStream(destinationUri)
+                    app.contentResolver.openOutputStream(destinationUri)
                         ?: run {
                             _events.tryEmit(UiEvent.Message("Export selhal: nelze otevřít cílový soubor."))
                             return@launch
@@ -522,76 +549,81 @@ object RideRepository {
 
                 _events.tryEmit(UiEvent.Message("Export hotov: ${meta.gpxFileName}"))
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Export selhal: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Export selhal: ${errorText(t)}"))
             }
         }
     }
 
     fun emailRideGpx(context: Context, metaFileName: String, emailAddress: String) {
-        try {
-            val meta = RideMetaStorage.listMetas(context).firstOrNull { it.metaFileName == metaFileName }
-            if (meta == null) {
-                _events.tryEmit(UiEvent.Message("Odeslání selhalo: jízda nebyla nalezena."))
-                return
-            }
+        val app = context.applicationContext
+        ioScope.launch {
+            try {
+                val meta = RideMetaStorage.listMetas(app).firstOrNull { it.metaFileName == metaFileName }
+                if (meta == null) {
+                    _events.tryEmit(UiEvent.Message("Odeslání selhalo: jízda nebyla nalezena."))
+                    return@launch
+                }
 
-            val sourceFile = File(File(context.filesDir, "rides"), meta.gpxFileName)
-            if (!sourceFile.exists()) {
-                _events.tryEmit(UiEvent.Message("Odeslání selhalo: GPX soubor neexistuje."))
-                return
-            }
+                val sourceFile = File(File(app.filesDir, "rides"), meta.gpxFileName)
+                if (!sourceFile.exists()) {
+                    _events.tryEmit(UiEvent.Message("Odeslání selhalo: GPX soubor neexistuje."))
+                    return@launch
+                }
 
-            val gpxUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", sourceFile)
-            val mailHandlers =
-                context.packageManager.queryIntentActivities(
-                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")),
-                    0,
-                )
-            if (mailHandlers.isEmpty()) {
-                _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
-                return
-            }
-
-            val targetIntents =
-                mailHandlers.map { resolveInfo ->
-                    context.grantUriPermission(
-                        resolveInfo.activityInfo.packageName,
-                        gpxUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                val gpxUri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", sourceFile)
+                val mailHandlers =
+                    app.packageManager.queryIntentActivities(
+                        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")),
+                        0,
                     )
-                    Intent(Intent.ACTION_SEND).apply {
-                        `package` = resolveInfo.activityInfo.packageName
-                        type = "*/*"
-                        putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
-                        putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
-                        putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
-                        putExtra(Intent.EXTRA_STREAM, gpxUri)
-                        clipData = ClipData.newUri(context.contentResolver, sourceFile.name, gpxUri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
+                if (mailHandlers.isEmpty()) {
+                    _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
+                    return@launch
                 }
 
-            val chooser =
-                if (targetIntents.size == 1) {
-                    targetIntents.first()
-                } else {
-                    Intent.createChooser(targetIntents.first(), "Odeslat GPX mailem").apply {
-                        putExtra(Intent.EXTRA_INITIAL_INTENTS, targetIntents.drop(1).toTypedArray())
+                val targetIntents =
+                    mailHandlers.map { resolveInfo ->
+                        app.grantUriPermission(
+                            resolveInfo.activityInfo.packageName,
+                            gpxUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                        Intent(Intent.ACTION_SEND).apply {
+                            `package` = resolveInfo.activityInfo.packageName
+                            type = "*/*"
+                            putExtra(Intent.EXTRA_EMAIL, arrayOf(emailAddress))
+                            putExtra(Intent.EXTRA_SUBJECT, sourceFile.nameWithoutExtension)
+                            putExtra(Intent.EXTRA_TEXT, "GPX trasa z Horse Trackeru.")
+                            putExtra(Intent.EXTRA_STREAM, gpxUri)
+                            clipData = ClipData.newUri(app.contentResolver, sourceFile.name, gpxUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
                     }
-                }
 
-            if (context !is Activity) {
-                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val chooser =
+                    if (targetIntents.size == 1) {
+                        targetIntents.first()
+                    } else {
+                        Intent.createChooser(targetIntents.first(), "Odeslat GPX mailem").apply {
+                            putExtra(Intent.EXTRA_INITIAL_INTENTS, targetIntents.drop(1).toTypedArray())
+                        }
+                    }.apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+
+                withContext(Dispatchers.Main) {
+                    app.startActivity(chooser)
+                }
+            } catch (_: ActivityNotFoundException) {
+                _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
+            } catch (t: Throwable) {
+                _events.tryEmit(UiEvent.Message("Odeslání GPX selhalo: ${errorText(t)}"))
             }
-            context.startActivity(chooser)
-        } catch (_: ActivityNotFoundException) {
-            _events.tryEmit(UiEvent.Message("V zařízení není dostupná e-mailová aplikace."))
-        } catch (t: Throwable) {
-            _events.tryEmit(UiEvent.Message("Odeslání GPX selhalo: ${t.message ?: t::class.java.simpleName}"))
         }
     }
 
     fun exportBackupToUri(context: Context, destinationUri: Uri) {
+        val app = context.applicationContext
         if (_state.value.isRecording || _state.value.isFollowing) {
             _events.tryEmit(UiEvent.Message("Backup nelze exportovat během aktivního záznamu nebo follow režimu."))
             return
@@ -599,15 +631,16 @@ object RideRepository {
 
         ioScope.launch {
             try {
-                AppBackupStorage.export(context, destinationUri)
+                AppBackupStorage.export(app, destinationUri)
                 _events.tryEmit(UiEvent.Message("Backup hotov."))
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Export backupu selhal: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Export backupu selhal: ${errorText(t)}"))
             }
         }
     }
 
     fun importBackupFromUri(context: Context, sourceUri: Uri) {
+        val app = context.applicationContext
         if (_state.value.isRecording || _state.value.isFollowing) {
             _events.tryEmit(UiEvent.Message("Backup nelze importovat během aktivního záznamu nebo follow režimu."))
             return
@@ -615,24 +648,25 @@ object RideRepository {
 
         ioScope.launch {
             try {
-                AppBackupStorage.import(context, sourceUri)
-                reloadFromStorage(context, _state.value)
-                scheduleCloudUpload(context)
+                AppBackupStorage.import(app, sourceUri)
+                reloadFromStorage(app, _state.value)
+                scheduleCloudUpload(app)
                 _events.tryEmit(UiEvent.Message("Backup obnoven."))
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Import backupu selhal: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Import backupu selhal: ${errorText(t)}"))
             }
         }
     }
 
     fun updateCloudSettings(context: Context, endpointUrl: String, token: String, enabled: Boolean) {
+        val app = context.applicationContext
         val settings =
             CloudSettingsStorage.CloudSettings(
                 endpointUrl = endpointUrl.trim(),
                 token = token.trim(),
                 enabled = enabled,
             )
-        CloudSettingsStorage.save(context, settings)
+        CloudSettingsStorage.save(app, settings)
         _state.value =
             _state.value.copy(
                 cloudEndpointUrl = settings.endpointUrl,
@@ -641,19 +675,20 @@ object RideRepository {
                 cloudSyncStatus = if (settings.isConfigured) "Cloud sync zapnutý." else "Cloud sync vypnutý.",
             )
         if (settings.isConfigured) {
-            scheduleCloudUpload(context, settings)
+            scheduleCloudUpload(app, settings)
         } else {
             Log.i(CLOUD_LOG_TAG, "Cloud sync disabled or missing URL.")
         }
     }
 
     fun restoreFromCloud(context: Context) {
+        val app = context.applicationContext
         if (_state.value.isRecording || _state.value.isFollowing) {
             _events.tryEmit(UiEvent.Message("Cloud obnovu nelze spustit během aktivního záznamu nebo follow režimu."))
             return
         }
 
-        val settings = CloudSettingsStorage.load(context)
+        val settings = CloudSettingsStorage.load(app)
         if (!settings.isConfigured) {
             _events.tryEmit(UiEvent.Message("Cloud URL není nastavena nebo sync není zapnutý."))
             return
@@ -663,13 +698,13 @@ object RideRepository {
             _state.value = _state.value.copy(cloudSyncStatus = "Cloud: obnovuji...")
             try {
                 Log.i(CLOUD_LOG_TAG, "Restoring cloud backup from ${settings.endpointUrl}.")
-                CloudBackupSync.restore(context.applicationContext, settings)
-                reloadFromStorage(context, _state.value.copy(cloudSyncStatus = "Cloud: obnoveno."))
-                scheduleCloudUpload(context)
+                CloudBackupSync.restore(app, settings)
+                reloadFromStorage(app, _state.value.copy(cloudSyncStatus = "Cloud: obnoveno."))
+                scheduleCloudUpload(app)
                 _events.tryEmit(UiEvent.Message("Cloud obnova hotova."))
             } catch (t: Throwable) {
                 Log.e(CLOUD_LOG_TAG, "Cloud restore failed.", t)
-                val message = "Cloud obnova selhala: ${t.message ?: t::class.java.simpleName}"
+                val message = "Cloud obnova selhala: ${errorText(t)}"
                 _state.value = _state.value.copy(cloudSyncStatus = message)
                 _events.tryEmit(UiEvent.Message(message))
             }
@@ -677,17 +712,18 @@ object RideRepository {
     }
 
     fun importRideFromUri(context: Context, horseId: String, sourceUri: Uri) {
+        val app = context.applicationContext
         ioScope.launch {
-            val horse = HorseStorage.listHorses(context).firstOrNull { it.id == horseId }
+            val horse = HorseStorage.listHorses(app).firstOrNull { it.id == horseId }
             if (horse == null) {
                 _events.tryEmit(UiEvent.Message("Import selhal: kůň nebyl nalezen."))
                 return@launch
             }
 
-            val tempFile = File.createTempFile("horse_tracker_import_", ".gpx", context.cacheDir)
+            val tempFile = File.createTempFile("horse_tracker_import_", ".gpx", app.cacheDir)
             try {
                 val input =
-                    context.contentResolver.openInputStream(sourceUri)
+                    app.contentResolver.openInputStream(sourceUri)
                         ?: run {
                             _events.tryEmit(UiEvent.Message("Import selhal: nelze otevřít GPX soubor."))
                             return@launch
@@ -702,7 +738,7 @@ object RideRepository {
                     return@launch
                 }
 
-                val ridesDir = File(context.filesDir, "rides").apply { mkdirs() }
+                val ridesDir = File(app.filesDir, "rides").apply { mkdirs() }
                 val ts = ride.points.firstOrNull()?.timeEpochMs ?: System.currentTimeMillis()
                 val baseName = buildRideBaseName(ride.points, horse.name, ts)
                 val uniqueBase = ensureUniqueBaseName(ridesDir, baseName, ts)
@@ -713,13 +749,13 @@ object RideRepository {
                 GpxStorage.writeGpx(gpxFile, ride.points, ride.waypoints)
 
                 val meta = buildRideMeta(horse.id, gpxName, metaName, ride.points)
-                RideMetaStorage.writeMeta(context, meta, metaName)
-                refreshStats(context)
-                refreshRides(context)
+                RideMetaStorage.writeMeta(app, meta, metaName)
+                refreshStats(app)
+                refreshRides(app)
 
                 _events.tryEmit(UiEvent.Message("GPX importován ke koni ${horse.name}."))
             } catch (t: Throwable) {
-                _events.tryEmit(UiEvent.Message("Import GPX selhal: ${t.message ?: t::class.java.simpleName}"))
+                _events.tryEmit(UiEvent.Message("Import GPX selhal: ${errorText(t)}"))
             } finally {
                 tempFile.delete()
             }
@@ -767,9 +803,10 @@ object RideRepository {
     }
 
     private fun refreshStats(context: Context) {
+        val app = context.applicationContext
         ioScope.launch {
-            val horses = HorseStorage.listHorses(context)
-            val stats = computeStats(context, horses)
+            val horses = HorseStorage.listHorses(app)
+            val stats = computeStats(app, horses)
             _state.value = _state.value.copy(horses = horses, horseStats = stats)
         }
     }
@@ -840,28 +877,34 @@ object RideRepository {
     }
 
     private fun reloadFromStorage(context: Context, baseState: AppState = _state.value) {
-        appContext = context.applicationContext
+        val app = context.applicationContext
+        appContext = app
         _state.value = baseState.copy(isLoadingData = true)
         ioScope.launch {
-            val horses = HorseStorage.listHorses(context)
-            val selected = SelectionStorage.getSelectedHorseId(context)
-            val stats = computeStats(context, horses)
-            val rides = listRidesInternal(context, selected)
-            val (warnM, backM) = FollowSettingsStorage.load(context)
-            val cloud = CloudSettingsStorage.load(context)
-            _state.value =
-                baseState.copy(
-                    isLoadingData = false,
-                    horses = horses,
-                    selectedHorseId = selected,
-                    horseStats = stats,
-                    rides = rides,
-                    offRouteWarnThresholdM = warnM,
-                    backOnRouteThresholdM = backM,
-                    cloudEndpointUrl = cloud.endpointUrl,
-                    cloudToken = cloud.token,
-                    cloudSyncEnabled = cloud.enabled,
-                )
+            try {
+                val horses = HorseStorage.listHorses(app)
+                val selected = SelectionStorage.getSelectedHorseId(app)
+                val stats = computeStats(app, horses)
+                val rides = listRidesInternal(app, selected)
+                val (warnM, backM) = FollowSettingsStorage.load(app)
+                val cloud = CloudSettingsStorage.load(app)
+                _state.value =
+                    baseState.copy(
+                        isLoadingData = false,
+                        horses = horses,
+                        selectedHorseId = selected,
+                        horseStats = stats,
+                        rides = rides,
+                        offRouteWarnThresholdM = warnM,
+                        backOnRouteThresholdM = backM,
+                        cloudEndpointUrl = cloud.endpointUrl,
+                        cloudToken = cloud.token,
+                        cloudSyncEnabled = cloud.enabled,
+                    )
+            } catch (t: Throwable) {
+                _state.value = baseState.copy(isLoadingData = false)
+                _events.tryEmit(UiEvent.Message("Obnovení dat selhalo: ${errorText(t)}"))
+            }
         }
     }
 
@@ -1000,14 +1043,14 @@ object RideRepository {
 
             val meta = buildRideMeta(horseId, gpxName, metaName, snapshot.points)
             RideMetaStorage.writeMeta(context, meta, metaName)
-            DraftRideStorage.clear(context)
+            clearDraftBlocking(context)
             refreshStats(context)
             refreshRides(context)
 
             _events.tryEmit(UiEvent.RideSaved(gpxFile.absolutePath))
             scheduleCloudUpload(context)
         } catch (t: Throwable) {
-            _events.tryEmit(UiEvent.Message("Uložení selhalo: ${t.message ?: t::class.java.simpleName}"))
+            _events.tryEmit(UiEvent.Message("Uložení selhalo: ${errorText(t)}"))
         }
     }
 
@@ -1039,7 +1082,7 @@ object RideRepository {
     private fun restoreDraftIfAvailable(context: Context, baseState: AppState): AppState {
         val draft = DraftRideStorage.readDraft(context) ?: return baseState
         if (draft.points.isEmpty()) {
-            DraftRideStorage.clear(context)
+            clearDraftBlocking(context)
             return baseState
         }
 
@@ -1089,10 +1132,14 @@ object RideRepository {
 
     private fun persistDraftAsync(snapshot: AppState) {
         val context = appContext ?: return
+        if (snapshot.points.isEmpty() && snapshot.rideWaypoints.isEmpty()) {
+            clearDraftAsync()
+            return
+        }
+        val generation = synchronized(draftIoLock) { draftGeneration }
         ioScope.launch {
-            if (snapshot.points.isEmpty() && snapshot.rideWaypoints.isEmpty()) {
-                DraftRideStorage.clear(context)
-            } else {
+            synchronized(draftIoLock) {
+                if (generation != draftGeneration) return@synchronized
                 DraftRideStorage.writeDraft(context, snapshot.selectedHorseId, snapshot.points, snapshot.rideWaypoints)
             }
         }
@@ -1100,7 +1147,14 @@ object RideRepository {
 
     private fun clearDraftAsync() {
         val context = appContext ?: return
-        ioScope.launch { DraftRideStorage.clear(context) }
+        ioScope.launch { clearDraftBlocking(context) }
+    }
+
+    private fun clearDraftBlocking(context: Context) {
+        synchronized(draftIoLock) {
+            draftGeneration++
+            DraftRideStorage.clear(context)
+        }
     }
 
     private fun clearDisplayedRide() {
@@ -1145,4 +1199,6 @@ object RideRepository {
         val cleaned = ascii.replace("[^A-Za-z0-9 ]+".toRegex(), " ").trim().replace("\\s+".toRegex(), " ")
         return if (cleaned.isBlank()) "UnknownHorse" else cleaned
     }
+
+    private fun errorText(t: Throwable): String = t.message ?: t::class.java.simpleName
 }

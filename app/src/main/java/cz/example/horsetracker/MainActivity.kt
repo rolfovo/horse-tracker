@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
         Mapbox.getInstance(applicationContext)
 
         PermissionRepository.refresh(this)
-        RideRepository.init(this)
+        RideRepository.init(applicationContext)
 
         setContent {
             MaterialTheme {

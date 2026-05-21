@@ -95,12 +95,13 @@ object RideStorage {
                 val lon = coords.getDouble(0)
                 val lat = coords.getDouble(1)
                 val props = f.optJSONObject("properties")
+                val label = props?.takeIf { !it.isNull("label") }?.optString("label")?.takeIf { it.isNotBlank() }
                 waypoints.add(
                     Waypoint(
                         lat = lat,
                         lon = lon,
                         timeEpochMs = props?.optLong("t") ?: 0L,
-                        label = props?.optString("label", null),
+                        label = label,
                     ),
                 )
             }

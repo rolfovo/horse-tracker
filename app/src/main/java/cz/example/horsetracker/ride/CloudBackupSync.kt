@@ -10,19 +10,22 @@ object CloudBackupSync {
         require(settings.endpointUrl.isNotBlank()) { "Cloud URL is empty" }
 
         val temp = File(context.cacheDir, "horse_tracker_cloud_backup.zip")
+        var connection: HttpURLConnection? = null
         try {
             temp.outputStream().use { output -> AppBackupStorage.export(context, output) }
-            val connection = openConnection(settings, method = "PUT", followRedirects = false).apply {
+            val activeConnection = openConnection(settings, method = "PUT", followRedirects = false).apply {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/zip")
                 setFixedLengthStreamingMode(temp.length())
             }
+            connection = activeConnection
 
             temp.inputStream().use { input ->
-                connection.outputStream.use { output -> input.copyTo(output) }
+                activeConnection.outputStream.use { output -> input.copyTo(output) }
             }
-            connection.requireSuccess()
+            activeConnection.requireSuccess()
         } finally {
+            connection?.disconnect()
             temp.delete()
         }
     }
@@ -30,11 +33,16 @@ object CloudBackupSync {
     fun restore(context: Context, settings: CloudSettingsStorage.CloudSettings) {
         require(settings.endpointUrl.isNotBlank()) { "Cloud URL is empty" }
 
-        val connection = openConnection(settings, method = "GET", followRedirects = true).apply {
-            setRequestProperty("Accept", "application/zip")
+        val connection =
+            openConnection(settings, method = "GET", followRedirects = true).apply {
+                setRequestProperty("Accept", "application/zip")
+            }
+        try {
+            connection.requireSuccess()
+            connection.inputStream.use { input -> AppBackupStorage.import(context, input) }
+        } finally {
+            connection.disconnect()
         }
-        connection.requireSuccess()
-        connection.inputStream.use { input -> AppBackupStorage.import(context, input) }
     }
 
     private fun openConnection(

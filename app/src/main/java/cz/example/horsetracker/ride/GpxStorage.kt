@@ -54,85 +54,90 @@ object GpxStorage {
 
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
-        parser.setInput(file.reader())
+        val reader = file.reader()
+        try {
+            parser.setInput(reader)
 
-        var event = parser.eventType
-        var inWpt = false
-        var wptLat = 0.0
-        var wptLon = 0.0
-        var wptTime = 0L
-        var wptName: String? = null
+            var event = parser.eventType
+            var inWpt = false
+            var wptLat = 0.0
+            var wptLon = 0.0
+            var wptTime = 0L
+            var wptName: String? = null
 
-        var inTrkpt = false
-        var trkLat = 0.0
-        var trkLon = 0.0
-        var trkTime = 0L
-        var speed = 0.0
-        var acc = 0.0
+            var inTrkpt = false
+            var trkLat = 0.0
+            var trkLon = 0.0
+            var trkTime = 0L
+            var speed = 0.0
+            var acc = 0.0
 
-        var currentText: String? = null
+            var currentText: String? = null
 
-        while (event != XmlPullParser.END_DOCUMENT) {
-            when (event) {
-                XmlPullParser.START_TAG -> {
-                    currentText = null
-                    when (parser.name) {
-                        "wpt" -> {
-                            inWpt = true
-                            wptLat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
-                            wptLon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            wptTime = 0L
-                            wptName = null
-                        }
+            while (event != XmlPullParser.END_DOCUMENT) {
+                when (event) {
+                    XmlPullParser.START_TAG -> {
+                        currentText = null
+                        when (parser.name) {
+                            "wpt" -> {
+                                inWpt = true
+                                wptLat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
+                                wptLon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
+                                wptTime = 0L
+                                wptName = null
+                            }
 
-                        "trkpt" -> {
-                            inTrkpt = true
-                            trkLat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
-                            trkLon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            trkTime = 0L
-                            speed = 0.0
-                            acc = 0.0
-                        }
-                    }
-                }
-
-                XmlPullParser.TEXT -> currentText = parser.text
-
-                XmlPullParser.END_TAG -> {
-                    val text = currentText?.trim()
-                    when (parser.name) {
-                        "time" -> {
-                            if (text != null) {
-                                if (inWpt) wptTime = parseTime(text)
-                                if (inTrkpt) trkTime = parseTime(text)
+                            "trkpt" -> {
+                                inTrkpt = true
+                                trkLat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
+                                trkLon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
+                                trkTime = 0L
+                                speed = 0.0
+                                acc = 0.0
                             }
                         }
+                    }
 
-                        "name" -> if (inWpt) wptName = text
-                        "speed_mps" -> if (inTrkpt) speed = text?.toDoubleOrNull() ?: 0.0
-                        "accuracy_m" -> if (inTrkpt) acc = text?.toDoubleOrNull() ?: 0.0
+                    XmlPullParser.TEXT -> currentText = parser.text
 
-                        "wpt" -> {
-                            inWpt = false
-                            waypoints.add(Waypoint(lat = wptLat, lon = wptLon, timeEpochMs = wptTime, label = wptName))
-                        }
+                    XmlPullParser.END_TAG -> {
+                        val text = currentText?.trim()
+                        when (parser.name) {
+                            "time" -> {
+                                if (text != null) {
+                                    if (inWpt) wptTime = parseTime(text)
+                                    if (inTrkpt) trkTime = parseTime(text)
+                                }
+                            }
 
-                        "trkpt" -> {
-                            inTrkpt = false
-                            points.add(
-                                TrackPoint(
-                                    lat = trkLat,
-                                    lon = trkLon,
-                                    timeEpochMs = trkTime,
-                                    speedMps = speed,
-                                    accuracyM = acc,
-                                ),
-                            )
+                            "name" -> if (inWpt) wptName = text
+                            "speed_mps" -> if (inTrkpt) speed = text?.toDoubleOrNull() ?: 0.0
+                            "accuracy_m" -> if (inTrkpt) acc = text?.toDoubleOrNull() ?: 0.0
+
+                            "wpt" -> {
+                                inWpt = false
+                                waypoints.add(Waypoint(lat = wptLat, lon = wptLon, timeEpochMs = wptTime, label = wptName))
+                            }
+
+                            "trkpt" -> {
+                                inTrkpt = false
+                                points.add(
+                                    TrackPoint(
+                                        lat = trkLat,
+                                        lon = trkLon,
+                                        timeEpochMs = trkTime,
+                                        speedMps = speed,
+                                        accuracyM = acc,
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
+                event = parser.next()
             }
-            event = parser.next()
+        } finally {
+            reader.close()
         }
 
         return Ride(points = enrichPoints(points), waypoints = waypoints)

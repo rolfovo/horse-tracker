@@ -13,16 +13,20 @@ object HorseStorage {
     fun listHorses(context: Context): List<Horse> {
         val file = file(context)
         if (!file.exists()) return emptyList()
-        val json = JSONObject(file.readText())
-        val arr = json.optJSONArray("horses") ?: return emptyList()
-        val out = ArrayList<Horse>(arr.length())
-        for (i in 0 until arr.length()) {
-            val h = arr.optJSONObject(i) ?: continue
-            val id = h.optString("id", "")
-            val name = h.optString("name", "")
-            if (id.isNotBlank() && name.isNotBlank()) out.add(Horse(id = id, name = name))
+        return try {
+            val json = JSONObject(file.readText())
+            val arr = json.optJSONArray("horses") ?: return emptyList()
+            val out = ArrayList<Horse>(arr.length())
+            for (i in 0 until arr.length()) {
+                val h = arr.optJSONObject(i) ?: continue
+                val id = h.optString("id", "")
+                val name = h.optString("name", "")
+                if (id.isNotBlank() && name.isNotBlank()) out.add(Horse(id = id, name = name))
+            }
+            out
+        } catch (_: Throwable) {
+            emptyList()
         }
-        return out
     }
 
     fun addHorse(context: Context, name: String): Horse {
