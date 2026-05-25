@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -183,7 +184,9 @@ fun App(
                 RideRepository.addHorse(context, it)
                 showHorsePicker = false
             },
-            onDelete = { RideRepository.deleteHorse(context, it.id) },
+            onDelete = { horse, deleteFromCloud ->
+                RideRepository.deleteHorse(context, horse.id, deleteFromCloud = deleteFromCloud)
+            },
             onClose = if (selectedHorse != null) ({ showHorsePicker = false }) else null,
             onImportGpx = { horse ->
                 pendingHorseImport = horse
@@ -251,8 +254,9 @@ fun App(
             onDelete = {
                 RideRepository.deleteRide(
                     context = context,
-                    metaFileName = it.metaFileName,
+                    metaFileName = it.ride.metaFileName,
                     horseIdFilter = ridesFilterHorseId,
+                    deleteFromCloud = it.deleteFromCloud,
                 )
             },
             onExport = { ride ->
@@ -765,13 +769,14 @@ private fun HorseSelectScreen(
     isLoadingData: Boolean,
     onSelect: (Horse) -> Unit,
     onAdd: (String) -> Unit,
-    onDelete: (Horse) -> Unit,
+    onDelete: (Horse, Boolean) -> Unit,
     onClose: (() -> Unit)?,
     onImportGpx: (Horse) -> Unit,
 ) {
     var newHorse by remember { mutableStateOf("") }
     var statsHorse by remember { mutableStateOf<Horse?>(null) }
     var deleteHorse by remember { mutableStateOf<Horse?>(null) }
+    var deleteHorseFromCloud by remember { mutableStateOf(false) }
     Column(
         modifier =
             Modifier
@@ -804,7 +809,13 @@ private fun HorseSelectScreen(
                         modifier = Modifier.weight(1f),
                     )
                     SmallButton(onClick = { onImportGpx(h) }, height = 36.dp) { Text("Import GPX") }
-                    SmallButton(onClick = { deleteHorse = h }, height = 36.dp) { Text("Smazat") }
+                    SmallButton(
+                        onClick = {
+                            deleteHorse = h
+                            deleteHorseFromCloud = false
+                        },
+                        height = 36.dp,
+                    ) { Text("Smazat") }
                 }
             }
         }
@@ -858,12 +869,24 @@ private fun HorseSelectScreen(
         AlertDialog(
             onDismissRequest = { deleteHorse = null },
             title = { Text("Smazat koně?") },
-            text = { Text("Opravdu smazat ${del.name}? Smažou se i všechny jeho jízdy.") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Opravdu smazat ${del.name}? Smažou se i všechny jeho jízdy.")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = deleteHorseFromCloud,
+                            onCheckedChange = { deleteHorseFromCloud = it },
+                        )
+                        Text("Smazat i z cloudu")
+                    }
+                }
+            },
             confirmButton = {
                 SmallButton(
                     onClick = {
-                        onDelete(del)
+                        onDelete(del, deleteHorseFromCloud)
                         deleteHorse = null
+                        deleteHorseFromCloud = false
                     },
                     height = 36.dp,
                 ) { Text("Smazat") }
@@ -1054,6 +1077,11 @@ private fun HorseItem(text: String, onClick: () -> Unit, onLongClick: () -> Unit
     }
 }
 
+private data class RideDeleteRequest(
+    val ride: RideSummary,
+    val deleteFromCloud: Boolean,
+)
+
 @Composable
 private fun RideListScreen(
     rides: List<RideSummary>,
@@ -1061,12 +1089,13 @@ private fun RideListScreen(
     filterHorseId: String?,
     onBack: () -> Unit,
     onLoad: (RideSummary) -> Unit,
-    onDelete: (RideSummary) -> Unit,
+    onDelete: (RideDeleteRequest) -> Unit,
     onExport: (RideSummary) -> Unit,
     onEmail: (RideSummary) -> Unit,
     onSelectHorseFilter: (String?) -> Unit,
 ) {
     var toDelete by remember { mutableStateOf<RideSummary?>(null) }
+    var deleteRideFromCloud by remember { mutableStateOf(false) }
     var emailRide by remember { mutableStateOf<RideSummary?>(null) }
     var showFilterDialog by remember { mutableStateOf(false) }
     val filterHorseName = horses.firstOrNull { it.id == filterHorseId }?.name
@@ -1105,7 +1134,13 @@ private fun RideListScreen(
                             SmallButton(onClick = { onLoad(r) }, height = 32.dp) { Text("Nahrát") }
                             SmallButton(onClick = { onExport(r) }, height = 32.dp) { Text("Export") }
                             SmallButton(onClick = { emailRide = r }, height = 32.dp) { Text("E-mail") }
-                            SmallButton(onClick = { toDelete = r }, height = 32.dp) { Text("Smazat") }
+                            SmallButton(
+                                onClick = {
+                                    toDelete = r
+                                    deleteRideFromCloud = false
+                                },
+                                height = 32.dp,
+                            ) { Text("Smazat") }
                         }
                     }
                 }
@@ -1118,12 +1153,24 @@ private fun RideListScreen(
         AlertDialog(
             onDismissRequest = { toDelete = null },
             title = { Text("Smazat jízdu?") },
-            text = { Text("Opravdu smazat ${del.gpxFileName}?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Opravdu smazat ${del.gpxFileName}?")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = deleteRideFromCloud,
+                            onCheckedChange = { deleteRideFromCloud = it },
+                        )
+                        Text("Smazat i z cloudu")
+                    }
+                }
+            },
             confirmButton = {
                 SmallButton(
                     onClick = {
-                        onDelete(del)
+                        onDelete(RideDeleteRequest(del, deleteRideFromCloud))
                         toDelete = null
+                        deleteRideFromCloud = false
                     },
                     height = 36.dp,
                 ) { Text("Smazat") }

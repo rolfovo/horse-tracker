@@ -41,9 +41,16 @@ object RideRepository {
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cloudSyncLock = Any()
     private var cloudSyncRunning = false
-    private var cloudSyncRequested = false
+    private var pendingCloudUpload: CloudUploadRequest? = null
+    private var localDeletePendingCloudConfirmation = false
     private val draftIoLock = Any()
     private var draftGeneration = 0L
+
+    private data class CloudUploadRequest(
+        val settings: CloudSettingsStorage.CloudSettings,
+        val minimumSummary: AppBackupStorage.BackupSummary,
+        val allowAfterLocalDelete: Boolean,
+    )
 
     fun init(context: Context) {
         val app = context.applicationContext
@@ -109,7 +116,7 @@ object RideRepository {
         }
     }
 
-    fun deleteHorse(context: Context, horseId: String) {
+    fun deleteHorse(context: Context, horseId: String, deleteFromCloud: Boolean = false) {
         val app = context.applicationContext
         ioScope.launch {
             try {
@@ -141,8 +148,27 @@ object RideRepository {
                         rides = rides,
                     )
 
-                _events.tryEmit(UiEvent.Message("Kůň smazán včetně jeho jízd."))
-                scheduleCloudUpload(app)
+                if (deleteFromCloud) {
+                    synchronized(cloudSyncLock) {
+                        localDeletePendingCloudConfirmation = false
+                    }
+                    scheduleCloudUpload(app, allowAfterLocalDelete = true)
+                    _events.tryEmit(UiEvent.Message("Kůň smazán včetně jeho jízd. Cloud bude aktualizován."))
+                } else {
+                    synchronized(cloudSyncLock) {
+                        localDeletePendingCloudConfirmation = true
+                    }
+                    _state.value =
+                        _state.value.copy(
+                            cloudSyncStatus =
+                                if (CloudSettingsStorage.load(app).isConfigured) {
+                                    "Cloud: lokální smazání není automaticky nahrané. Tlačítko Uložit přepíše cloud."
+                                } else {
+                                    _state.value.cloudSyncStatus
+                                },
+                        )
+                    _events.tryEmit(UiEvent.Message("Kůň smazán včetně jeho jízd. Cloud záloha zůstala beze změny."))
+                }
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Mazání koně selhalo: ${errorText(t)}"))
             }
@@ -502,7 +528,12 @@ object RideRepository {
         }
     }
 
-    fun deleteRide(context: Context, metaFileName: String, horseIdFilter: String? = _state.value.selectedHorseId) {
+    fun deleteRide(
+        context: Context,
+        metaFileName: String,
+        horseIdFilter: String? = _state.value.selectedHorseId,
+        deleteFromCloud: Boolean = false,
+    ) {
         val app = context.applicationContext
         ioScope.launch {
             try {
@@ -512,8 +543,27 @@ object RideRepository {
                 File(ridesDir, meta.metaFileName).delete()
                 refreshStats(app)
                 refreshRides(app, horseIdFilter)
-                scheduleCloudUpload(app)
-                _events.tryEmit(UiEvent.Message("Jízda smazána."))
+                if (deleteFromCloud) {
+                    synchronized(cloudSyncLock) {
+                        localDeletePendingCloudConfirmation = false
+                    }
+                    scheduleCloudUpload(app, allowAfterLocalDelete = true)
+                    _events.tryEmit(UiEvent.Message("Jízda smazána. Cloud bude aktualizován."))
+                } else {
+                    synchronized(cloudSyncLock) {
+                        localDeletePendingCloudConfirmation = true
+                    }
+                    _state.value =
+                        _state.value.copy(
+                            cloudSyncStatus =
+                                if (CloudSettingsStorage.load(app).isConfigured) {
+                                    "Cloud: lokální smazání není automaticky nahrané. Tlačítko Uložit přepíše cloud."
+                                } else {
+                                    _state.value.cloudSyncStatus
+                                },
+                        )
+                    _events.tryEmit(UiEvent.Message("Jízda smazána. Cloud záloha zůstala beze změny."))
+                }
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Mazání selhalo: ${errorText(t)}"))
             }
@@ -650,7 +700,10 @@ object RideRepository {
             try {
                 AppBackupStorage.import(app, sourceUri)
                 reloadFromStorage(app, _state.value)
-                scheduleCloudUpload(app)
+                synchronized(cloudSyncLock) {
+                    localDeletePendingCloudConfirmation = false
+                }
+                scheduleCloudUpload(app, allowAfterLocalDelete = true)
                 _events.tryEmit(UiEvent.Message("Backup obnoven."))
             } catch (t: Throwable) {
                 _events.tryEmit(UiEvent.Message("Import backupu selhal: ${errorText(t)}"))
@@ -675,7 +728,7 @@ object RideRepository {
                 cloudSyncStatus = if (settings.isConfigured) "Cloud sync zapnutý." else "Cloud sync vypnutý.",
             )
         if (settings.isConfigured) {
-            scheduleCloudUpload(app, settings)
+            scheduleCloudUpload(app, settings, allowAfterLocalDelete = true)
         } else {
             Log.i(CLOUD_LOG_TAG, "Cloud sync disabled or missing URL.")
         }
@@ -699,8 +752,11 @@ object RideRepository {
             try {
                 Log.i(CLOUD_LOG_TAG, "Restoring cloud backup from ${settings.endpointUrl}.")
                 CloudBackupSync.restore(app, settings)
+                synchronized(cloudSyncLock) {
+                    localDeletePendingCloudConfirmation = false
+                }
                 reloadFromStorage(app, _state.value.copy(cloudSyncStatus = "Cloud: obnoveno."))
-                scheduleCloudUpload(app)
+                scheduleCloudUpload(app, allowAfterLocalDelete = true)
                 _events.tryEmit(UiEvent.Message("Cloud obnova hotova."))
             } catch (t: Throwable) {
                 Log.e(CLOUD_LOG_TAG, "Cloud restore failed.", t)
@@ -814,6 +870,7 @@ object RideRepository {
     private fun scheduleCloudUpload(
         context: Context,
         initialSettings: CloudSettingsStorage.CloudSettings? = null,
+        allowAfterLocalDelete: Boolean = false,
     ) {
         val app = context.applicationContext
         val settings = initialSettings ?: CloudSettingsStorage.load(app)
@@ -821,37 +878,70 @@ object RideRepository {
             Log.d(CLOUD_LOG_TAG, "Cloud upload skipped: sync disabled or URL missing.")
             return
         }
+        if (!allowAfterLocalDelete && synchronized(cloudSyncLock) { localDeletePendingCloudConfirmation }) {
+            _state.value =
+                _state.value.copy(
+                    cloudSyncStatus = "Cloud: lokální smazání čeká na ruční Uložit nebo Obnovit.",
+                )
+            Log.i(CLOUD_LOG_TAG, "Cloud upload skipped after local delete until explicit user action.")
+            return
+        }
+        val request =
+            CloudUploadRequest(
+                settings = settings,
+                minimumSummary = AppBackupStorage.summary(app),
+                allowAfterLocalDelete = allowAfterLocalDelete,
+            )
 
         synchronized(cloudSyncLock) {
             if (cloudSyncRunning) {
                 Log.d(CLOUD_LOG_TAG, "Cloud upload already running, scheduling another pass.")
-                cloudSyncRequested = true
+                pendingCloudUpload = request
                 return
             }
             cloudSyncRunning = true
         }
 
         ioScope.launch {
-            var pendingSettings: CloudSettingsStorage.CloudSettings? = settings
+            var currentRequest: CloudUploadRequest? = request
             while (true) {
-                val currentSettings = pendingSettings ?: CloudSettingsStorage.load(app)
-                pendingSettings = null
+                val uploadRequest =
+                    currentRequest
+                        ?: CloudUploadRequest(
+                            settings = CloudSettingsStorage.load(app),
+                            minimumSummary = AppBackupStorage.summary(app),
+                            allowAfterLocalDelete = false,
+                        )
+                currentRequest = null
+                val currentSettings = uploadRequest.settings
                 if (!currentSettings.isConfigured) {
                     _state.value = _state.value.copy(cloudSyncStatus = "Cloud sync vypnutý.")
                     Log.i(CLOUD_LOG_TAG, "Cloud upload stopped: sync disabled or URL missing.")
                     synchronized(cloudSyncLock) {
                         cloudSyncRunning = false
-                        cloudSyncRequested = false
+                        pendingCloudUpload = null
                     }
                     return@launch
                 }
 
                 _state.value = _state.value.copy(cloudSyncStatus = "Cloud: ukládám...")
                 Log.i(CLOUD_LOG_TAG, "Uploading cloud backup to ${currentSettings.endpointUrl}.")
-                val result = runCatching { CloudBackupSync.upload(app, currentSettings) }
+                val result =
+                    runCatching {
+                        val currentSummary = AppBackupStorage.summary(app)
+                        check(!currentSummary.isSmallerThan(uploadRequest.minimumSummary)) {
+                            "Uložení do cloudu přeskočeno: lokální data se po spuštění ukládání zmenšila."
+                        }
+                        CloudBackupSync.upload(app, currentSettings)
+                    }
                 result
                     .onSuccess { Log.i(CLOUD_LOG_TAG, "Cloud upload finished successfully.") }
                     .onFailure { Log.e(CLOUD_LOG_TAG, "Cloud upload failed.", it) }
+                if (result.isSuccess && uploadRequest.allowAfterLocalDelete) {
+                    synchronized(cloudSyncLock) {
+                        localDeletePendingCloudConfirmation = false
+                    }
+                }
                 _state.value =
                     _state.value.copy(
                         cloudSyncStatus =
@@ -861,20 +951,24 @@ object RideRepository {
                             ),
                     )
 
-                val runAgain =
+                val nextRequest =
                     synchronized(cloudSyncLock) {
-                        if (cloudSyncRequested) {
-                            cloudSyncRequested = false
-                            true
+                        val pending = pendingCloudUpload
+                        if (pending != null) {
+                            pendingCloudUpload = null
+                            pending
                         } else {
                             cloudSyncRunning = false
-                            false
+                            null
                         }
                     }
-                if (!runAgain) return@launch
+                currentRequest = nextRequest ?: return@launch
             }
         }
     }
+
+    private fun AppBackupStorage.BackupSummary.isSmallerThan(other: AppBackupStorage.BackupSummary): Boolean =
+        horsesCount < other.horsesCount || ridesCount < other.ridesCount
 
     private fun reloadFromStorage(context: Context, baseState: AppState = _state.value) {
         val app = context.applicationContext
